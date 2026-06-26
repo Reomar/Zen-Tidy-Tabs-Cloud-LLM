@@ -4,7 +4,7 @@
 
 This repository is a Zen Browser chrome mod forked from `Vertex-Mods/Zen-Tidy-Tabs`.
 
-It injects a brush button and separator line into Zen's vertical tabs sidebar, then sorts ungrouped tabs into task-based groups. The fork keeps the original local Firefox ML path, adds an optional Gemini provider, and reshapes grouping so it prefers active task context over literal page-title similarity.
+It injects a brush button and separator line into Zen's vertical tabs sidebar, then sorts ungrouped tabs into AI-generated groups. The fork keeps the original Firefox local ML path, adds an optional Gemini provider, and now treats the provider output as the source of truth for grouping.
 
 ## Files
 
@@ -30,9 +30,10 @@ It injects a brush button and separator line into Zen's vertical tabs sidebar, t
 
 - Injects the sort UI into `.pinned-tabs-container-separator`.
 - Sorts only tabs from the active workspace.
-- Prefers matching new tabs into existing groups first.
-- Uses task-first grouping for remaining tabs.
-- Sends weak or isolated leftovers to `Others`.
+- Passes current tabs and existing group context to the selected provider.
+- Reuses an existing group only by exact normalized name when the provider chooses it.
+- Creates new groups directly from provider-returned topic names.
+- Leaves unassigned tabs untouched unless the provider explicitly places them in `Others`.
 - Preserves grouped tabs during Zen's clear-tabs flow.
 - Falls back to Firefox local AI if Gemini fails.
 
@@ -49,26 +50,26 @@ The settings UI intentionally keeps the Gemini API key field always visible. Sin
 
 ## Grouping Intent
 
-The fork should group by task and category, not by narrow page-title fragments.
+The provider prompt should group by task and browsing context, not by narrow page-title fragments.
 
 Good outcomes:
 
-- several GitHub, docs, and search tabs for the same task collapse into one broader research group
-- debugging pages cluster into `Troubleshooting`
-- orphan tabs land in `Others`
+- several GitHub, docs, and search tabs for the same task collapse into one broader task group
+- existing groups are reused only when the provider intentionally names them
+- miscellaneous tabs land in `Others` only if the provider decides they should
 
 Bad outcomes:
 
 - many single-tab groups
-- separate groups for each GitHub repo when they are part of one task
-- leaving obviously related tabs unsorted
+- local code silently renaming or merging provider output
+- local heuristics overriding what the provider already decided
 
 ## Important Areas In `tidy-tabs.uc.js`
 
 - provider selection and request fallback
 - local embedding cache behavior
-- existing-group matching
-- task-profile extraction and post-processing merges
+- provider prompt and JSON parsing
+- direct assignment-to-group translation
 - sidebar injection and visibility updates
 - clear-tabs patching
 
@@ -81,6 +82,7 @@ Be careful when changing any of those paths because failures are visible directl
 - Do not assume sidebar parents exist; guard DOM access aggressively.
 - If JS changes IDs or selectors, update `userChrome.css` in lockstep.
 - Prefer soft failure and fallback over throwing from chrome context.
+- Do not reintroduce local semantic merge logic unless the product intent changes.
 - Use ASCII unless the file already needs something else.
 
 ## Validation
@@ -90,6 +92,6 @@ Manual validation in Zen is required:
 1. Import or reload the mod through Sine Mods.
 2. Confirm the separator line and brush button appear when sortable tabs exist.
 3. Test both providers.
-4. Test existing-group matching plus new-group creation.
-5. Confirm leftovers go to `Others`.
+4. Test existing-group reuse by exact provider-chosen name plus new-group creation.
+5. Confirm `Others` only appears when the provider explicitly returns it.
 6. Confirm clear-tabs still preserves grouped tabs.

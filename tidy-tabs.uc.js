@@ -7,18 +7,13 @@
 (() => {
   const CONFIG = {
     SIMILARITY_THRESHOLD: 0.45,
-    GROUP_SIMILARITY_THRESHOLD: 0.65, // Lowered from 0.75 to be more inclusive for existing groups
-    FALLBACK_GROUP_SIMILARITY_THRESHOLD: 0.52,
-    FALLBACK_TITLE_SIMILARITY_THRESHOLD: 0.58,
     MIN_TABS_FOR_SORT: 6, // This is the ammount of tabs for the button to show, not the ammount of tabs you need in a group
     DEBOUNCE_DELAY: 250,
     ANIMATION_DURATION: 800,
     MAX_INIT_CHECKS: 50,
     INIT_CHECK_INTERVAL: 100,
-    CONSOLIDATION_DISTANCE_THRESHOLD: 2,
     EMBEDDING_BATCH_SIZE: 5,
     MAX_EMBEDDING_CACHE_SIZE: 250,
-    EXISTING_GROUP_BOOST: 0.1, // Boost similarity score for existing groups to prefer them
   };
 
   const PROVIDERS = {
@@ -43,84 +38,6 @@
     OUTPUT_TOKENS_PER_EXISTING_GROUP: 12,
     REQUEST_TIMEOUT_MS: 15000,
   };
-
-  const TASK_GROUP_CONFIG = {
-    MIN_NAMED_GROUP_SIZE: 2,
-    OTHERS_GROUP_NAME: "Others",
-    MERGE_THRESHOLD: 1.8,
-  };
-
-  const TASK_TOKEN_NORMALIZATION = {
-    tabs: "tab",
-    tab: "tab",
-    sorting: "sort",
-    sorted: "sort",
-    sorter: "sort",
-    browser: "browser",
-    browsers: "browser",
-    issues: "issue",
-    issue: "issue",
-    troubleshooting: "troubleshoot",
-    troubleshoot: "troubleshoot",
-    errors: "error",
-    docs: "doc",
-    documentation: "doc",
-    repos: "repo",
-    repositories: "repo",
-    repository: "repo",
-    signin: "login",
-    login: "login",
-    logged: "login",
-    searching: "search",
-    searches: "search",
-  };
-
-  const TASK_STOP_WORDS = new Set([
-    "the",
-    "and",
-    "for",
-    "with",
-    "from",
-    "into",
-    "your",
-    "using",
-    "make",
-    "look",
-    "awesome",
-    "includes",
-    "install",
-    "home",
-    "page",
-    "github",
-    "google",
-    "gitlab",
-    "www",
-    "com",
-    "org",
-    "net",
-    "sign",
-    "login",
-    "issue",
-    "pull",
-    "request",
-    "repo",
-    "new",
-    "open",
-    "store",
-    "information",
-    "advanced",
-    "preferences",
-    "tutorial",
-    "work",
-    "agents",
-  ]);
-
-  const SEARCH_HOSTS = new Set([
-    "google.com",
-    "bing.com",
-    "duckduckgo.com",
-    "search.brave.com",
-  ]);
 
   // --- Globals & State ---
   let isSorting = false;
@@ -300,7 +217,8 @@
       return safeFallback;
     }
 
-    const cleaned = toTitleCase(topic)
+    const cleaned = topic
+      .trim()
       .replace(/^['"`]+|['"`]+$/g, "")
       .replace(/[.?!,:;]+$/g, "")
       .trim()
@@ -309,335 +227,45 @@
     return cleaned || safeFallback;
   };
 
-  const incrementMapCount = (map, key, amount = 1) => {
-    if (!key) return;
-    map.set(key, (map.get(key) || 0) + amount);
-  };
-
   const uniqueArray = (items) => Array.from(new Set(items.filter(Boolean)));
 
-  const extractTaskTokens = (...parts) => {
-    const rawTokens = parts
-      .filter((part) => typeof part === "string" && part.trim())
-      .join(" ")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, " ")
-      .split(/\s+/)
-      .filter(Boolean);
-
-    return uniqueArray(
-      rawTokens
-        .map((token) => TASK_TOKEN_NORMALIZATION[token] || token)
-        .filter((token) => token.length > 2 && !TASK_STOP_WORDS.has(token))
-    );
-  };
-
-  const buildTabTaskProfile = (tab) => {
-    const title = getTabTitle(tab);
-    const navigationInfo = getTabNavigationInfo(tab);
-    const host = navigationInfo.host.toLowerCase();
-    const pathHint = navigationInfo.pathHint.toLowerCase();
-    const tokens = extractTaskTokens(
-      title,
-      host.replace(/\./g, " "),
-      pathHint.replace(/[\/_-]/g, " ")
-    );
-    const categories = new Set();
-
-    if (
-      tokens.includes("troubleshoot") ||
-      tokens.includes("error") ||
-      tokens.includes("debug") ||
-      tokens.includes("fix") ||
-      tokens.includes("problem")
-    ) {
-      categories.add("troubleshooting");
-    }
-
-    if (
-      host === "github.com" ||
-      host === "gitlab.com" ||
-      host.endsWith(".github.com") ||
-      host.includes("stackoverflow") ||
-      host.includes("yarnpkg.com") ||
-      host.includes("npmjs.com") ||
-      host.includes("developer.mozilla.org") ||
-      host.startsWith("docs.") ||
-      tokens.includes("browser") ||
-      tokens.includes("extension") ||
-      tokens.includes("plugin")
-    ) {
-      categories.add("research");
-    }
-
-    if (SEARCH_HOSTS.has(host)) {
-      categories.add("search");
-    }
-
-    if (
-      /\bsign in\b|\blog in\b|\blogin\b|\bauth\b|\baccount\b/i.test(title) ||
-      tokens.includes("login") ||
-      tokens.includes("auth")
-    ) {
-      categories.add("auth");
-    }
-
-    return {
-      tab,
-      title,
-      host,
-      pathHint,
-      tokens,
-      categories,
-    };
-  };
-
-  const buildTaskGroupProfile = (groupName, tabs, lockedExistingNames = new Set()) => {
-    const tabProfiles = tabs.map((tab) => buildTabTaskProfile(tab));
-    const tokenCounts = new Map();
-    const hostCounts = new Map();
-    const categoryCounts = new Map();
-
-    tabProfiles.forEach((profile) => {
-      profile.tokens.forEach((token) => incrementMapCount(tokenCounts, token));
-      if (profile.host) {
-        incrementMapCount(hostCounts, profile.host);
-      }
-      profile.categories.forEach((category) =>
-        incrementMapCount(categoryCounts, category)
-      );
-    });
-
-    const primaryHost =
-      [...hostCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
-
-    return {
-      sourceName: groupName,
-      tabs,
-      tabProfiles,
-      tokenCounts,
-      hostCounts,
-      categoryCounts,
-      primaryHost,
-      isLockedExisting:
-        lockedExistingNames.has(groupName) &&
-        groupName !== TASK_GROUP_CONFIG.OTHERS_GROUP_NAME,
-    };
-  };
-
-  const getSharedTaskTokens = (profileA, profileB) => {
-    const tokensA = new Set(profileA.tokenCounts.keys());
-    return [...profileB.tokenCounts.keys()].filter((token) => tokensA.has(token));
-  };
-
-  const calculateTaskGroupSimilarity = (profileA, profileB) => {
-    if (profileA.isLockedExisting || profileB.isLockedExisting) {
-      return -Infinity;
-    }
-
-    let score = 0;
-    const sharedTokens = getSharedTaskTokens(profileA, profileB);
-
-    score += Math.min(sharedTokens.length, 3) * 0.7;
-
-    if (
-      sharedTokens.includes("tab") &&
-      (sharedTokens.includes("sort") ||
-        sharedTokens.includes("browser") ||
-        sharedTokens.includes("zen"))
-    ) {
-      score += 1;
-    }
-
-    if (
-      profileA.categoryCounts.has("troubleshooting") &&
-      profileB.categoryCounts.has("troubleshooting")
-    ) {
-      score += 1.5;
-    }
-
-    if (
-      profileA.categoryCounts.has("research") &&
-      profileB.categoryCounts.has("research")
-    ) {
-      score += 0.8;
-    }
-
-    if (
-      (profileA.categoryCounts.has("search") &&
-        profileB.categoryCounts.has("research")) ||
-      (profileB.categoryCounts.has("search") &&
-        profileA.categoryCounts.has("research"))
-    ) {
-      score += 0.6;
-    }
-
-    if (
-      (profileA.categoryCounts.has("auth") &&
-        profileB.categoryCounts.has("research") &&
-        profileA.primaryHost === "github.com" &&
-        profileB.primaryHost === "github.com") ||
-      (profileB.categoryCounts.has("auth") &&
-        profileA.categoryCounts.has("research") &&
-        profileA.primaryHost === "github.com" &&
-        profileB.primaryHost === "github.com")
-    ) {
-      score += 1.4;
-    }
-
-    if (
-      profileA.primaryHost &&
-      profileA.primaryHost === profileB.primaryHost &&
-      !SEARCH_HOSTS.has(profileA.primaryHost)
-    ) {
-      score += 0.5;
-    }
-
-    return score;
-  };
-
-  const mergeTaskGroupProfiles = (targetProfile, sourceProfile) => {
-    const mergedTabs = uniqueArray([...targetProfile.tabs, ...sourceProfile.tabs]);
-    return buildTaskGroupProfile(
-      targetProfile.sourceName,
-      mergedTabs,
-      new Set()
-    );
-  };
-
-  const getTopTaskTokens = (tokenCounts, limit = 3) =>
-    [...tokenCounts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .map(([token]) => token)
-      .slice(0, limit);
-
-  const inferTaskGroupName = (profile) => {
-    const topTokens = getTopTaskTokens(profile.tokenCounts, 4);
-
-    if (profile.categoryCounts.has("troubleshooting")) {
-      return "Troubleshooting";
-    }
-
-    if (topTokens.includes("tab") && topTokens.includes("sort")) {
-      return "Tab Sorting Research";
-    }
-
-    if (topTokens.includes("zen") && topTokens.includes("browser")) {
-      return "Zen Browser Research";
-    }
-
-    if (profile.primaryHost === "github.com" && profile.categoryCounts.has("research")) {
-      return sanitizeTopicName(
-        `${toTitleCase(topTokens.slice(0, 2).join(" "))} Research`,
-        "GitHub Research"
-      );
-    }
-
-    if (profile.categoryCounts.has("research")) {
-      return sanitizeTopicName(
-        `${toTitleCase(topTokens.slice(0, 2).join(" "))} Research`,
-        "Research"
-      );
-    }
-
-    if (topTokens.length >= 2) {
-      return sanitizeTopicName(topTokens.slice(0, 2).join(" "), "Others");
-    }
-
-    if (topTokens.length === 1) {
-      return sanitizeTopicName(topTokens[0], "Others");
-    }
-
-    return TASK_GROUP_CONFIG.OTHERS_GROUP_NAME;
-  };
-
-  const buildTaskFirstGroups = (
+  const buildFinalGroupsFromAssignments = (
     assignments,
-    sortableTabs,
-    lockedExistingNames = new Set()
+    existingGroupNameMap = new Map()
   ) => {
-    const assignmentMap = new Map();
-    const assignedTabs = new Set();
+    const finalGroups = {};
+    const seenTabs = new Set();
 
     assignments.forEach(({ tab, topic }) => {
-      if (!tab?.isConnected || !topic) return;
-      if (!assignmentMap.has(topic)) {
-        assignmentMap.set(topic, []);
+      // Providers own the grouping decision now. This layer only drops
+      // invalid/duplicate assignments and preserves exact existing-group names.
+      if (
+        !tab?.isConnected ||
+        seenTabs.has(tab) ||
+        typeof topic !== "string" ||
+        !topic.trim()
+      ) {
+        return;
       }
-      assignmentMap.get(topic).push(tab);
-      assignedTabs.add(tab);
+
+      const normalizedTopic = normalizeTopicKey(topic);
+      const canonicalExistingGroup =
+        existingGroupNameMap.get(normalizedTopic) || null;
+      const finalTopic = canonicalExistingGroup
+        ? canonicalExistingGroup
+        : sanitizeTopicName(topic, "Group");
+
+      if (!finalTopic) {
+        return;
+      }
+
+      if (!finalGroups[finalTopic]) {
+        finalGroups[finalTopic] = [];
+      }
+
+      finalGroups[finalTopic].push(tab);
+      seenTabs.add(tab);
     });
-
-    const initialProfiles = Array.from(assignmentMap.entries()).map(([topic, tabs]) =>
-      buildTaskGroupProfile(topic, uniqueArray(tabs), lockedExistingNames)
-    );
-
-    const buckets = [];
-    initialProfiles
-      .sort((a, b) => b.tabs.length - a.tabs.length)
-      .forEach((profile) => {
-        if (profile.isLockedExisting) {
-          buckets.push(profile);
-          return;
-        }
-
-        let bestBucketIndex = -1;
-        let bestScore = 0;
-
-        buckets.forEach((bucket, index) => {
-          const similarity = calculateTaskGroupSimilarity(profile, bucket);
-          if (similarity > bestScore) {
-            bestScore = similarity;
-            bestBucketIndex = index;
-          }
-        });
-
-        if (bestBucketIndex !== -1 && bestScore >= TASK_GROUP_CONFIG.MERGE_THRESHOLD) {
-          buckets[bestBucketIndex] = mergeTaskGroupProfiles(
-            buckets[bestBucketIndex],
-            profile
-          );
-        } else {
-          buckets.push(profile);
-        }
-      });
-
-    const finalGroups = {};
-    const othersTabs = sortableTabs.filter((tab) => !assignedTabs.has(tab));
-
-    buckets.forEach((bucket) => {
-      const uniqueTabs = uniqueArray(bucket.tabs);
-      if (uniqueTabs.length === 0) {
-        return;
-      }
-
-      if (bucket.isLockedExisting) {
-        finalGroups[bucket.sourceName] = uniqueTabs;
-        return;
-      }
-
-      if (uniqueTabs.length < TASK_GROUP_CONFIG.MIN_NAMED_GROUP_SIZE) {
-        othersTabs.push(...uniqueTabs);
-        return;
-      }
-
-      const inferredName = inferTaskGroupName(
-        buildTaskGroupProfile(bucket.sourceName, uniqueTabs, lockedExistingNames)
-      );
-      const finalName =
-        inferredName === TASK_GROUP_CONFIG.OTHERS_GROUP_NAME
-          ? TASK_GROUP_CONFIG.OTHERS_GROUP_NAME
-          : inferredName;
-
-      if (!finalGroups[finalName]) {
-        finalGroups[finalName] = [];
-      }
-      finalGroups[finalName].push(...uniqueTabs);
-    });
-
-    if (othersTabs.length > 0) {
-      finalGroups[TASK_GROUP_CONFIG.OTHERS_GROUP_NAME] = uniqueArray(othersTabs);
-    }
 
     Object.keys(finalGroups).forEach((groupName) => {
       finalGroups[groupName] = uniqueArray(finalGroups[groupName]);
@@ -653,36 +281,6 @@
       .split(" ")
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(" ");
-  };
-
-  const levenshteinDistance = (a, b) => {
-    if (!a || !b || typeof a !== "string" || typeof b !== "string") {
-      return Math.max(a?.length ?? 0, b?.length ?? 0);
-    }
-    a = a.toLowerCase();
-    b = b.toLowerCase();
-    if (a.length === 0) return b.length;
-    if (b.length === 0) return a.length;
-
-    const matrix = [];
-    for (let i = 0; i <= b.length; i++) {
-      matrix[i] = [i];
-    }
-    for (let j = 0; j <= a.length; j++) {
-      matrix[0][j] = j;
-    }
-
-    for (let i = 1; i <= b.length; i++) {
-      for (let j = 1; j <= a.length; j++) {
-        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j] + 1, // Deletion
-          matrix[i][j - 1] + 1, // Insertion
-          matrix[i - 1][j - 1] + cost // Substitution
-        );
-      }
-    }
-    return matrix[b.length][a.length];
   };
 
   const findGroupElement = (topicName, workspaceId) => {
@@ -974,11 +572,15 @@
       .join("\n");
 
     return [
+      // The prompt is now the source of truth for grouping policy.
+      // Local code should not merge, broaden, or "fix" the model's decisions.
       "Group browser tabs by browsing task or topic.",
       "Prefer broad task-oriented groups over narrow repo-name or page-name groups.",
-      "Prefer assigning related tabs to an existing group when it is a good fit.",
+      "You must decide the final grouping yourself from the provided tabs and existing groups.",
+      "Reuse an existing group only when it is clearly the best fit, and use the exact existing group name when you do.",
       "Use concise title-case task names with at most 24 characters.",
-      "Do not create singleton niche groups. Put weak, isolated, or miscellaneous tabs into Others.",
+      "Do not create singleton niche groups unless a tab genuinely deserves its own group.",
+      "Put weak, isolated, or miscellaneous tabs into Others.",
       "Favor useful work-context grouping over literal title similarity.",
       'Return only valid JSON with this exact shape: {"assignments":[{"tabId":"t1","topic":"Example"}]}.',
       "Do not include markdown fences, prose, explanations, or extra keys.",
@@ -1058,6 +660,8 @@
     };
 
     if (useStructuredOutput) {
+      // Ask Gemini for machine-readable JSON first so the browser code can
+      // consume assignments directly without natural-language parsing.
       generationConfig.responseFormat = {
         text: {
           mimeType: "application/json",
@@ -1167,6 +771,8 @@
     existingGroupCount
   ) => {
     let lastError = null;
+    // Scale the response budget with session size so assignment lists do not
+    // get truncated when many tabs or existing groups are included in context.
     const maxOutputTokens = getGeminiMaxOutputTokens(tabCount, existingGroupCount);
 
     for (let index = 0; index < GEMINI_CONFIG.MODELS.length; index++) {
@@ -1187,6 +793,9 @@
         let effectiveError = error;
 
         if (shouldRetryGeminiWithoutStructuredOutput(error)) {
+          // Some Gemini model variants reject structured output fields even
+          // though others accept them. Retry the same model without schema
+          // before giving up on that model entirely.
           console.warn(
             `[TabSort][Gemini] ${modelName} rejected structured output. Retrying without schema.`
           );
@@ -1256,12 +865,6 @@
 
     const currentWorkspaceId = window.gZenWorkspaces?.activeWorkspace;
     const existingWorkspaceGroups = getExistingWorkspaceGroups(currentWorkspaceId);
-    const existingGroupNameMap = new Map(
-      Array.from(existingWorkspaceGroups.keys()).map((groupName) => [
-        normalizeTopicKey(groupName),
-        groupName,
-      ])
-    );
 
     const tabRecords = validTabs.map((tab, index) => {
       const navigationInfo = getTabNavigationInfo(tab);
@@ -1317,16 +920,10 @@
           }
 
           seenTabIds.add(assignment.tabId);
-          const canonicalExistingGroup =
-            existingGroupNameMap.get(normalizeTopicKey(assignment.topic)) || null;
-          const topic = canonicalExistingGroup
-            ? canonicalExistingGroup
-            : sanitizeTopicName(assignment.topic, tabRecord.title);
-
-          return topic
+          return assignment.topic
             ? {
                 tab: tabRecord.tab,
-                topic,
+                topic: assignment.topic,
               }
             : null;
         })
@@ -1343,335 +940,150 @@
     const validTabs = tabs.filter((tab) => tab?.isConnected);
     if (!validTabs.length) return [];
 
-    const currentWorkspaceId = window.gZenWorkspaces?.activeWorkspace;
     const result = [];
-    const ungroupedTabs = [];
-
-    // Get existing groups in current workspace
-    const existingWorkspaceGroups = getExistingWorkspaceGroups(currentWorkspaceId);
-
-    // Process tabs in batches for better performance
-    const tabTitles = validTabs.map((tab) => getTabTitle(tab));
     const embeddings = await processTabsInBatches(validTabs);
+    const validEmbeddings = embeddings.filter(
+      (embedding) => Array.isArray(embedding) && embedding.length > 0
+    );
+    const validIndices = embeddings
+      .map((embedding, index) =>
+        Array.isArray(embedding) && embedding.length > 0 ? index : -1
+      )
+      .filter((index) => index !== -1);
 
-    // Calculate embeddings for existing workspace groups
-    const existingGroupEmbeddings = new Map();
-    for (const [groupName, groupInfo] of existingWorkspaceGroups) {
+    if (validEmbeddings.length <= 1) {
+      return result;
+    }
+
+    const allGroups = clusterEmbeddings(
+      validEmbeddings,
+      CONFIG.SIMILARITY_THRESHOLD
+    );
+    const groups = allGroups.filter(
+      (group) => Array.isArray(group) && group.length > 1
+    );
+
+    if (groups.length === 0) {
+      return result;
+    }
+
+    function extractKeywords(titles) {
+      const allWords = titles
+        .join(" ")
+        .toLowerCase()
+        .replace(/[^\w\s]/g, " ")
+        .split(/\s+/)
+        .filter((word) => word.length > 2);
+
+      const wordCount = {};
+      allWords.forEach((word) => {
+        wordCount[word] = (wordCount[word] || 0) + 1;
+      });
+
+      const stopWords = new Set([
+        "the",
+        "and",
+        "for",
+        "are",
+        "but",
+        "not",
+        "you",
+        "all",
+        "can",
+        "had",
+        "her",
+        "was",
+        "one",
+        "our",
+        "out",
+        "day",
+        "get",
+        "has",
+        "him",
+        "his",
+        "how",
+        "man",
+        "new",
+        "now",
+        "old",
+        "see",
+        "two",
+        "way",
+        "who",
+        "boy",
+        "did",
+        "its",
+        "let",
+        "put",
+        "say",
+        "she",
+        "too",
+        "use",
+      ]);
+
+      const keywords = Object.entries(wordCount)
+        .filter(([word]) => !stopWords.has(word))
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([word]) => word);
+
+      return keywords;
+    }
+
+    async function nameGroupWithSmartTabTopic(titles) {
+      const keywords = extractKeywords(titles);
+      const input = `Topic from keywords: ${keywords.join(
+        ", "
+      )}. titles:\n${titles.join("\n")}`;
+
       try {
-        const groupTabEmbeddings = await processTabsInBatches(groupInfo.tabs);
-        const validGroupEmbeddings = groupTabEmbeddings.filter(emb => 
-          Array.isArray(emb) && emb.length > 0
+        const { createEngine } = ChromeUtils.importESModule(
+          "chrome://global/content/ml/EngineProcess.sys.mjs"
         );
-        if (validGroupEmbeddings.length > 0) {
-          const avgEmbedding = averageEmbedding(validGroupEmbeddings);
-          existingGroupEmbeddings.set(groupName, avgEmbedding);
+        let engine = await createEngine({
+          taskName: "text2text-generation",
+          modelId: "Mozilla/smart-tab-topic",
+          modelHub: "huggingface",
+          engineId: "group-namer",
+        });
+
+        const aiResult = await engine.run({
+          args: [input],
+          options: { max_new_tokens: 8, temperature: 0.7 },
+        });
+
+        let name = (aiResult[0]?.generated_text || "Group")
+          .split("\n")
+          .map((line) => line.trim())
+          .find((line) => line);
+
+        name = toTitleCase(name);
+        if (!name || /none|adult content/i.test(name)) {
+          name = titles[0].split("–")[0].trim().slice(0, 24);
         }
+
+        return sanitizeTopicName(name, "Group");
       } catch (e) {
-        console.error(`[TabSort] Error calculating embedding for existing group "${groupName}":`, e);
+        console.error("[TabSort][AI] Error naming group:", e);
+        return "Group";
       }
     }
 
-    // Enhanced matching: try to match tabs to existing groups
-    for (let i = 0; i < validTabs.length; i++) {
-      const tab = validTabs[i];
-      const tabEmbedding = embeddings[i];
-      const tabTitle = tabTitles[i];
+    for (const group of groups) {
+      // Firefox local mode still uses local embeddings to discover clusters,
+      // but once a cluster exists the local topic model names it directly.
+      // No extra heuristic merge/correction runs after this point.
+      const groupTabs = group.map((index) => validTabs[validIndices[index]]);
+      const groupTitles = groupTabs.map((tab) => getTabTitle(tab));
+      const groupName = await nameGroupWithSmartTabTopic(groupTitles);
 
-      if (!tabEmbedding) {
-        ungroupedTabs.push(tab);
-        continue;
-      }
+      groupTabs.forEach((tab) => {
+        result.push({ tab, topic: groupName });
+      });
 
-      let bestMatch = null;
-      let bestSimilarity = 0;
-      let bestEmbeddingFallbackMatch = null;
-      let bestEmbeddingFallbackSimilarity = 0;
-      let bestTitleFallbackMatch = null;
-      let bestTitleFallbackSimilarity = 0;
-
-      // Check against current workspace groups
-      for (const [groupName, groupInfo] of existingWorkspaceGroups) {
-        const groupEmbedding = existingGroupEmbeddings.get(groupName);
-        if (!groupEmbedding) continue;
-
-        let similarity = cosineSimilarity(tabEmbedding, groupEmbedding);
-        similarity += CONFIG.EXISTING_GROUP_BOOST; // Always boost existing groups
-
-        if (similarity > bestEmbeddingFallbackSimilarity) {
-          bestEmbeddingFallbackMatch = {
-            groupData: { groupName },
-            similarity,
-            isExistingGroup: true,
-            matchType: "embedding-fallback",
-          };
-          bestEmbeddingFallbackSimilarity = similarity;
-        }
-
-        if (similarity > CONFIG.GROUP_SIMILARITY_THRESHOLD && similarity > bestSimilarity) {
-          bestMatch = { 
-            groupData: { groupName }, 
-            similarity,
-            isExistingGroup: true
-          };
-          bestSimilarity = similarity;
-        }
-      }
-
-      // Additional semantic matching for existing groups using title similarity
-      if (!bestMatch || bestMatch.similarity < 0.8) {
-        for (const [groupName, groupInfo] of existingWorkspaceGroups) {
-          // Check if tab title has semantic similarity to group tabs
-          const titleSimilarities = groupInfo.tabTitles.map(groupTabTitle => {
-            const distance = levenshteinDistance(tabTitle.toLowerCase(), groupTabTitle.toLowerCase());
-            const maxLen = Math.max(tabTitle.length, groupTabTitle.length);
-            return maxLen > 0 ? 1 - (distance / maxLen) : 0;
-          });
-
-          const maxTitleSimilarity = Math.max(...titleSimilarities);
-          const adjustedSimilarity =
-            maxTitleSimilarity * 0.8 + CONFIG.EXISTING_GROUP_BOOST;
-
-          if (adjustedSimilarity > bestTitleFallbackSimilarity) {
-            bestTitleFallbackMatch = {
-              groupData: { groupName },
-              similarity: adjustedSimilarity,
-              isExistingGroup: true,
-              matchType: "title-fallback",
-            };
-            bestTitleFallbackSimilarity = adjustedSimilarity;
-          }
-          
-          // If we find strong title similarity, consider it a match
-          if (maxTitleSimilarity > 0.7) {
-            if (adjustedSimilarity > CONFIG.GROUP_SIMILARITY_THRESHOLD && adjustedSimilarity > bestSimilarity) {
-              bestMatch = { 
-                groupData: { groupName }, 
-                similarity: adjustedSimilarity,
-                isExistingGroup: true,
-                matchType: 'title'
-              };
-              bestSimilarity = adjustedSimilarity;
-            }
-          }
-        }
-      }
-
-      if (!bestMatch) {
-        const fallbackCandidates = [
-          bestEmbeddingFallbackMatch,
-          bestTitleFallbackMatch,
-        ].filter(Boolean);
-
-        const fallbackMatch = fallbackCandidates.sort(
-          (a, b) => b.similarity - a.similarity
-        )[0];
-
-        if (
-          fallbackMatch &&
-          ((fallbackMatch.matchType === "embedding-fallback" &&
-            fallbackMatch.similarity >=
-              CONFIG.FALLBACK_GROUP_SIMILARITY_THRESHOLD) ||
-            (fallbackMatch.matchType === "title-fallback" &&
-              fallbackMatch.similarity >=
-                CONFIG.FALLBACK_TITLE_SIMILARITY_THRESHOLD))
-        ) {
-          bestMatch = fallbackMatch;
-          bestSimilarity = fallbackMatch.similarity;
-        }
-      }
-
-      if (bestMatch) {
-        // Add tab to existing group
-        result.push({ tab, topic: bestMatch.groupData.groupName });
-        console.log(`[TabSort] Matched "${tabTitle}" to existing group "${bestMatch.groupData.groupName}" (similarity: ${bestMatch.similarity.toFixed(3)}, type: ${bestMatch.matchType || 'embedding'})`);
-      } else {
-        ungroupedTabs.push(tab);
-      }
-    }
-
-    console.log(`[TabSort] Matched ${result.length} tabs to existing groups, ${ungroupedTabs.length} tabs remain ungrouped`);
-
-    // Second pass: cluster remaining ungrouped tabs (only if we have enough)
-    if (ungroupedTabs.length > 1) {
-      const ungroupedEmbeddings = await processTabsInBatches(ungroupedTabs);
-
-      // Filter out empty embeddings
-      const validEmbeddings = ungroupedEmbeddings.filter(
-        (emb) => Array.isArray(emb) && emb.length > 0
+      console.log(
+        `[TabSort] Created direct local AI group "${groupName}" with ${groupTabs.length} tabs`
       );
-      const validIndices = ungroupedEmbeddings
-        .map((emb, idx) => (Array.isArray(emb) && emb.length > 0 ? idx : -1))
-        .filter((idx) => idx !== -1);
-
-      if (validEmbeddings.length > 1) {
-        // Cluster the ungrouped tabs
-        const allGroups = clusterEmbeddings(
-          validEmbeddings,
-          CONFIG.SIMILARITY_THRESHOLD
-        );
-        const groups = allGroups.filter(
-          (group) => Array.isArray(group) && group.length > 1
-        );
-
-        if (groups.length > 0) {
-          // Extract keywords function
-          function extractKeywords(titles) {
-            const allWords = titles
-              .join(" ")
-              .toLowerCase()
-              .replace(/[^\w\s]/g, " ")
-              .split(/\s+/)
-              .filter((word) => word.length > 2);
-
-            const wordCount = {};
-            allWords.forEach((word) => {
-              wordCount[word] = (wordCount[word] || 0) + 1;
-            });
-
-            const stopWords = new Set([
-              "the",
-              "and",
-              "for",
-              "are",
-              "but",
-              "not",
-              "you",
-              "all",
-              "can",
-              "had",
-              "her",
-              "was",
-              "one",
-              "our",
-              "out",
-              "day",
-              "get",
-              "has",
-              "him",
-              "his",
-              "how",
-              "man",
-              "new",
-              "now",
-              "old",
-              "see",
-              "two",
-              "way",
-              "who",
-              "boy",
-              "did",
-              "its",
-              "let",
-              "put",
-              "say",
-              "she",
-              "too",
-              "use",
-            ]);
-
-            const keywords = Object.entries(wordCount)
-              .filter(([word]) => !stopWords.has(word))
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 5)
-              .map(([word]) => word);
-
-            return keywords;
-          }
-
-          // Group naming function
-          async function nameGroupWithSmartTabTopic(titles) {
-            const keywords = extractKeywords(titles);
-            const input = `Topic from keywords: ${keywords.join(
-              ", "
-            )}. titles:\n${titles.join("\n")}`;
-
-            try {
-              const { createEngine } = ChromeUtils.importESModule(
-                "chrome://global/content/ml/EngineProcess.sys.mjs"
-              );
-              let engine = await createEngine({
-                taskName: "text2text-generation",
-                modelId: "Mozilla/smart-tab-topic",
-                modelHub: "huggingface",
-                engineId: "group-namer",
-              });
-
-              const aiResult = await engine.run({
-                args: [input],
-                options: { max_new_tokens: 8, temperature: 0.7 },
-              });
-
-              let name = (aiResult[0]?.generated_text || "Group")
-                .split("\n")
-                .map((l) => l.trim())
-                .find((l) => l);
-
-              name = toTitleCase(name);
-              if (!name || /none|adult content/i.test(name)) {
-                name = titles[0].split("–")[0].trim().slice(0, 24);
-              }
-
-              name = name
-                .replace(/^['"`]+|['"`]+$/g, "")
-                .replace(/[.?!,:;]+$/, "")
-                .slice(0, 24);
-              return name || "Group";
-            } catch (e) {
-              console.error("[TabSort][AI] Error naming group:", e);
-              return "Group";
-            }
-          }
-
-          // Process each new group
-          for (let groupIdx = 0; groupIdx < groups.length; groupIdx++) {
-            const group = groups[groupIdx];
-            const groupTabs = group.map(
-              (idx) => ungroupedTabs[validIndices[idx]]
-            );
-            const groupTitles = groupTabs.map((tab) => getTabTitle(tab));
-
-            // Check if this new group would be similar to an existing group
-            let shouldCreateNewGroup = true;
-            let targetExistingGroup = null;
-
-            if (groupTabs.length >= 2) {
-              const groupEmbeddings = group.map((idx) => validEmbeddings[idx]);
-              const avgEmbedding = averageEmbedding(groupEmbeddings);
-
-              // Check similarity to existing groups one more time with the averaged embedding
-              for (const [groupName, groupInfo] of existingWorkspaceGroups) {
-                const existingEmbedding = existingGroupEmbeddings.get(groupName);
-                if (existingEmbedding) {
-                  const similarity = cosineSimilarity(avgEmbedding, existingEmbedding) + CONFIG.EXISTING_GROUP_BOOST;
-                  if (similarity > CONFIG.GROUP_SIMILARITY_THRESHOLD * 0.9) { // Slightly lower threshold for group-to-group matching
-                    shouldCreateNewGroup = false;
-                    targetExistingGroup = groupName;
-                    console.log(`[TabSort] Merging new group into existing group "${groupName}" (similarity: ${similarity.toFixed(3)})`);
-                    break;
-                  }
-                }
-              }
-            }
-
-            if (!shouldCreateNewGroup && targetExistingGroup) {
-              // Add all tabs to the existing group
-              groupTabs.forEach((tab) => {
-                result.push({ tab, topic: targetExistingGroup });
-              });
-            } else {
-              // Create new group
-              const groupName = await nameGroupWithSmartTabTopic(groupTitles);
-
-              // Add to result
-              groupTabs.forEach((tab) => {
-                result.push({ tab, topic: groupName });
-              });
-
-              console.log(`[TabSort] Created new group "${groupName}" with ${groupTabs.length} tabs`);
-            }
-          }
-        }
-      }
     }
 
     return result;
@@ -1830,14 +1242,14 @@
         return; // Exit early
       }
 
-      // --- Step 1: Get ALL Existing Group Names for Context ---
-      const allExistingGroupNames = new Set();
+      // --- Step 1: Collect existing group names for exact canonical reuse ---
+      const existingGroupNameMap = new Map();
       const groupSelector = `tab-group:has(tab[zen-workspace-id="${currentWorkspaceId}"])`;
 
       document.querySelectorAll(groupSelector).forEach((groupEl) => {
         const label = groupEl.getAttribute("label");
         if (label) {
-          allExistingGroupNames.add(label);
+          existingGroupNameMap.set(normalizeTopicKey(label), label);
         }
       });
 
@@ -1871,7 +1283,8 @@
         initialTabsToSort.length,
         "tabs"
       );
-      const aiTabTopics = await askAIForMultipleTopics(initialTabsToSort);
+      const aiTabTopics =
+        (await askAIForMultipleTopics(initialTabsToSort)) || [];
       console.log(
         "[TabSort] Debug - AI returned",
         aiTabTopics.length,
@@ -1879,102 +1292,17 @@
       );
       // --- End AI Grouping ---
 
-      // --- Create Task-First Final Groups ---
-      const finalGroups = buildTaskFirstGroups(
+      // Providers now return the final grouping intent. This step only turns
+      // those assignments into the tab-move structure used by the UI layer.
+      const finalGroups = buildFinalGroupsFromAssignments(
         aiTabTopics,
-        initialTabsToSort,
-        allExistingGroupNames
+        existingGroupNameMap
       );
-      // --- End Create Task-First Final Groups ---
 
-      // --- Consolidate Similar Category Names ---
-      const originalKeys = Object.keys(finalGroups);
-      const mergedKeys = new Set();
-      const consolidationMap = {};
-
-      for (let i = 0; i < originalKeys.length; i++) {
-        let keyA = originalKeys[i];
-        if (mergedKeys.has(keyA)) continue;
-        while (consolidationMap[keyA]) {
-          keyA = consolidationMap[keyA];
-        }
-        if (mergedKeys.has(keyA)) continue;
-
-        for (let j = i + 1; j < originalKeys.length; j++) {
-          let keyB = originalKeys[j];
-          if (mergedKeys.has(keyB)) continue;
-          while (consolidationMap[keyB]) {
-            keyB = consolidationMap[keyB];
-          }
-          if (mergedKeys.has(keyB) || keyA === keyB) continue;
-
-          const distance = levenshteinDistance(keyA, keyB);
-          const threshold = CONFIG.CONSOLIDATION_DISTANCE_THRESHOLD;
-
-          if (distance <= threshold && distance > 0) {
-            let canonicalKey = keyA;
-            let mergedKey = keyB;
-            const keyAIsActuallyExisting = allExistingGroupNames.has(keyA);
-            const keyBIsActuallyExisting = allExistingGroupNames.has(keyB);
-
-            if (keyBIsActuallyExisting && !keyAIsActuallyExisting) {
-              [canonicalKey, mergedKey] = [keyB, keyA];
-            } else if (keyAIsActuallyExisting && keyBIsActuallyExisting) {
-              if (keyA.length > keyB.length)
-                [canonicalKey, mergedKey] = [keyB, keyA];
-            } else if (!keyAIsActuallyExisting && !keyBIsActuallyExisting) {
-              if (keyA.length > keyB.length)
-                [canonicalKey, mergedKey] = [keyB, keyA];
-            }
-
-            if (finalGroups[mergedKey]) {
-              if (!finalGroups[canonicalKey]) finalGroups[canonicalKey] = [];
-              const uniqueTabsToAdd = finalGroups[mergedKey].filter(
-                (tab) =>
-                  tab &&
-                  tab.isConnected &&
-                  !finalGroups[canonicalKey].some(
-                    (existingTab) => existingTab === tab
-                  )
-              );
-              finalGroups[canonicalKey].push(...uniqueTabsToAdd);
-            }
-            mergedKeys.add(mergedKey);
-            consolidationMap[mergedKey] = canonicalKey;
-            delete finalGroups[mergedKey];
-            if (mergedKey === keyA) {
-              keyA = canonicalKey;
-              break;
-            }
-          }
-        }
-      }
-
-      // --- End Consolidation ---
-
-      // Check if sorting failed (no meaningful grouping occurred)
-      // Success criteria:
-      // 1. Created groups with multiple tabs, OR
-      // 2. Successfully matched tabs to existing groups (even single tabs)
-      const multiTabGroups = Object.entries(finalGroups).filter(
-        ([topic, tabs]) =>
-          topic !== TASK_GROUP_CONFIG.OTHERS_GROUP_NAME && tabs.length > 1
-      );
-      const othersGroupSize =
-        finalGroups[TASK_GROUP_CONFIG.OTHERS_GROUP_NAME]?.length || 0;
-      
       // Count tabs that were successfully assigned by the provider
       const assignedTabsCount = aiTabTopics.length;
-      
-      // Sorting is successful if:
-      // - We created meaningful named groups, OR
-      // - We assigned tabs to task groups, OR
-      // - We collected leftovers into Others, OR
-      // - We only had 1 tab to sort (no failure for single tabs)
-      const sortingFailed = 
-        multiTabGroups.length === 0 && 
+      const sortingFailed =
         assignedTabsCount === 0 &&
-        othersGroupSize === 0 &&
         initialTabsToSort.length > 1;
 
       console.log(
@@ -1982,13 +1310,7 @@
         initialTabsToSort.length
       );
       console.log("[TabSort] Debug - Final groups:", Object.keys(finalGroups));
-      console.log("[TabSort] Debug - Multi-tab groups:", multiTabGroups.length);
       console.log("[TabSort] Debug - Assigned tabs count:", assignedTabsCount);
-      console.log("[TabSort] Debug - Others group size:", othersGroupSize);
-      console.log(
-        "[TabSort] Debug - multiTabGroups.length === 0:",
-        multiTabGroups.length === 0
-      );
       console.log(
         "[TabSort] Debug - assignedTabsCount === 0:",
         assignedTabsCount === 0

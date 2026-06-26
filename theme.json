@@ -1,7 +1,7 @@
 {
   "id": "better-tidy-tabs",
   "name": "Better Tidy Tabs",
-  "description": "Sort Zen tabs by task with Firefox local AI or optional Gemini fallback.",
+  "description": "AI-powered tab grouping for Zen Browser with Firefox local and Gemini providers.",
   "scripts": {
     "tidy-tabs.uc.js": {
       "include": [
@@ -17,20 +17,19 @@
   "readme": "https://raw.githubusercontent.com/Reomar/better-tidy-tabs/main/README.md",
   "image": "https://raw.githubusercontent.com/Reomar/better-tidy-tabs/main/image.png",
   "author": "Reomar",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "tags": [
     "Fork",
     "Zen Browser",
     "Vertical Tabs",
     "Tab Groups",
-    "Tab Folders",
     "Tab Sorting",
     "AI",
-    "Local",
-    "12th"
+    "Gemini",
+    "Sine Mods"
   ],
   "createdAt": "2025-09-20",
-  "updatedAt": "2026-06-26 00:00",
+  "updatedAt": "2026-06-26 00:30",
   "modules": ["Vertex-Mods/Advanced-Tab-Groups"],
   "ai": "yes",
   "fork": ["zen"]
