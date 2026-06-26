@@ -21,6 +21,26 @@
     EXISTING_GROUP_BOOST: 0.1, // Boost similarity score for existing groups to prefer them
   };
 
+  const PROVIDERS = {
+    FIREFOX_LOCAL: "firefox-local",
+    GEMINI: "gemini",
+  };
+
+  const PREFS = {
+    PROVIDER: "extension.zen-tidy-tabs.provider",
+    GEMINI_API_KEY: "extension.zen-tidy-tabs.gemini-api-key",
+  };
+
+  const GEMINI_CONFIG = {
+    MODEL: "gemini-2.5-flash-lite",
+    MAX_TITLE_LENGTH: 120,
+    MAX_PATH_HINT_LENGTH: 60,
+    MAX_GROUP_SAMPLE_TITLES: 3,
+    MAX_GROUP_NAME_LENGTH: 24,
+    MAX_OUTPUT_TOKENS: 512,
+    REQUEST_TIMEOUT_MS: 15000,
+  };
+
   // --- Globals & State ---
   let isSorting = false;
   let sortButtonListenerAdded = false;
@@ -142,6 +162,70 @@
       console.error("Error getting tab title for tab:", tab, e);
       return "Error Processing Tab";
     }
+  };
+
+  const getTabNavigationInfo = (tab) => {
+    if (!tab?.isConnected) {
+      return { host: "", pathHint: "" };
+    }
+
+    try {
+      const browser =
+        tab.linkedBrowser ||
+        tab._linkedBrowser ||
+        gBrowser?.getBrowserForTab?.(tab);
+      const spec = browser?.currentURI?.spec;
+      if (!spec || spec.startsWith("about:")) {
+        return { host: "", pathHint: "" };
+      }
+
+      const url = new URL(spec);
+      const host = url.hostname.replace(/^www\./, "");
+      const pathSegments = url.pathname
+        .split("/")
+        .filter(Boolean)
+        .slice(0, 3);
+      const searchHint =
+        url.searchParams.get("q") ||
+        url.searchParams.get("query") ||
+        url.searchParams.get("search") ||
+        "";
+      const pathHint = pathSegments.join("/") || searchHint;
+
+      return {
+        host,
+        pathHint,
+      };
+    } catch {
+      return { host: "", pathHint: "" };
+    }
+  };
+
+  const truncateText = (text, maxLength) => {
+    if (!text || typeof text !== "string") return "";
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, maxLength - 1)}…`;
+  };
+
+  const normalizeTopicKey = (topic) => {
+    if (!topic || typeof topic !== "string") return "";
+    return topic.trim().toLowerCase();
+  };
+
+  const sanitizeTopicName = (topic, fallback = "Group") => {
+    const safeFallback =
+      typeof fallback === "string" && fallback.trim() ? fallback.trim() : "Group";
+    if (!topic || typeof topic !== "string") {
+      return safeFallback;
+    }
+
+    const cleaned = toTitleCase(topic)
+      .replace(/^['"`]+|['"`]+$/g, "")
+      .replace(/[.?!,:;]+$/g, "")
+      .trim()
+      .slice(0, GEMINI_CONFIG.MAX_GROUP_NAME_LENGTH);
+
+    return cleaned || safeFallback;
   };
 
   const toTitleCase = (str) => {
@@ -405,7 +489,263 @@
     }
   };
 
-  const askAIForMultipleTopics = async (tabs) => {
+  const getPreferredAIProvider = () => {
+    try {
+      return Services.prefs.getStringPref(
+        PREFS.PROVIDER,
+        PROVIDERS.FIREFOX_LOCAL
+      );
+    } catch {
+      return PROVIDERS.FIREFOX_LOCAL;
+    }
+  };
+
+  const getGeminiApiKey = () => {
+    try {
+      return Services.prefs.getStringPref(PREFS.GEMINI_API_KEY, "").trim();
+    } catch {
+      return "";
+    }
+  };
+
+  const getExistingWorkspaceGroups = (workspaceId) => {
+    const existingWorkspaceGroups = new Map();
+    if (!workspaceId) {
+      return existingWorkspaceGroups;
+    }
+
+    const groupSelector = `tab-group:has(tab[zen-workspace-id="${workspaceId}"])`;
+    document.querySelectorAll(groupSelector).forEach((groupEl) => {
+      const label = groupEl.getAttribute("label");
+      if (!label) return;
+
+      const groupTabs = Array.from(groupEl.querySelectorAll("tab")).filter(
+        (tab) => tab.getAttribute("zen-workspace-id") === workspaceId
+      );
+
+      if (groupTabs.length > 0) {
+        existingWorkspaceGroups.set(label, {
+          element: groupEl,
+          tabs: groupTabs,
+          tabTitles: groupTabs.map((tab) => getTabTitle(tab)),
+        });
+      }
+    });
+
+    return existingWorkspaceGroups;
+  };
+
+  const buildGeminiPrompt = (tabRecords, existingGroups) => {
+    const existingGroupsText =
+      existingGroups.length === 0
+        ? "None"
+        : existingGroups
+            .map(
+              (group) =>
+                `${group.name}: ${group.sampleTitles.join(" | ") || "No samples"}`
+            )
+            .join("\n");
+
+    const tabsText = tabRecords
+      .map((tab) => {
+        const parts = [`${tab.id}`, tab.title];
+        if (tab.host) parts.push(`host=${tab.host}`);
+        if (tab.pathHint) parts.push(`path=${tab.pathHint}`);
+        return parts.join(" | ");
+      })
+      .join("\n");
+
+    return [
+      "Group browser tabs by browsing task or topic.",
+      "Prefer assigning related tabs to an existing group when it is a good fit.",
+      "Create concise title-case group names with at most 24 characters.",
+      "Only include tabs that should be grouped. Omit tabs that should remain ungrouped.",
+      "Favor useful broader grouping over leaving obviously related tabs out.",
+      "",
+      "Existing groups:",
+      existingGroupsText,
+      "",
+      "Tabs:",
+      tabsText,
+    ].join("\n");
+  };
+
+  const parseGeminiResponseText = (responseData) => {
+    const parts = responseData?.candidates?.[0]?.content?.parts;
+    if (!Array.isArray(parts)) return "";
+    return parts
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("")
+      .trim();
+  };
+
+  const stripCodeFences = (text) => {
+    if (!text || typeof text !== "string") return "";
+    return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  };
+
+  const GEMINI_ASSIGNMENTS_SCHEMA = {
+    type: "object",
+    properties: {
+      assignments: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            tabId: { type: "string" },
+            topic: { type: "string" },
+          },
+          required: ["tabId", "topic"],
+        },
+      },
+    },
+    required: ["assignments"],
+  };
+
+  const requestGeminiAssignments = async (prompt, apiKey) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      GEMINI_CONFIG.REQUEST_TIMEOUT_MS
+    );
+
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_CONFIG.MODEL}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": apiKey,
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [{ text: prompt }],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.2,
+              maxOutputTokens: GEMINI_CONFIG.MAX_OUTPUT_TOKENS,
+              responseFormat: {
+                text: {
+                  mimeType: "application/json",
+                  schema: GEMINI_ASSIGNMENTS_SCHEMA,
+                },
+              },
+            },
+          }),
+          signal: controller.signal,
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Gemini request failed with status ${response.status}`);
+      }
+
+      const responseData = await response.json();
+      const rawText = parseGeminiResponseText(responseData);
+      if (!rawText) {
+        throw new Error("Gemini returned an empty response");
+      }
+
+      return JSON.parse(stripCodeFences(rawText));
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  const askGeminiForMultipleTopics = async (tabs) => {
+    if (!Array.isArray(tabs) || tabs.length === 0) return null;
+
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      console.warn("[TabSort][Gemini] Missing API key, falling back to local AI.");
+      return null;
+    }
+
+    const validTabs = tabs.filter((tab) => tab?.isConnected);
+    if (!validTabs.length) return [];
+
+    const currentWorkspaceId = window.gZenWorkspaces?.activeWorkspace;
+    const existingWorkspaceGroups = getExistingWorkspaceGroups(currentWorkspaceId);
+    const existingGroupNameMap = new Map(
+      Array.from(existingWorkspaceGroups.keys()).map((groupName) => [
+        normalizeTopicKey(groupName),
+        groupName,
+      ])
+    );
+
+    const tabRecords = validTabs.map((tab, index) => {
+      const navigationInfo = getTabNavigationInfo(tab);
+      return {
+        id: `t${index + 1}`,
+        tab,
+        title: truncateText(getTabTitle(tab), GEMINI_CONFIG.MAX_TITLE_LENGTH),
+        host: navigationInfo.host,
+        pathHint: truncateText(
+          navigationInfo.pathHint,
+          GEMINI_CONFIG.MAX_PATH_HINT_LENGTH
+        ),
+      };
+    });
+
+    const prompt = buildGeminiPrompt(
+      tabRecords,
+      Array.from(existingWorkspaceGroups.entries()).map(([groupName, groupInfo]) => ({
+        name: groupName,
+        sampleTitles: groupInfo.tabTitles
+          .slice(0, GEMINI_CONFIG.MAX_GROUP_SAMPLE_TITLES)
+          .map((title) => truncateText(title, GEMINI_CONFIG.MAX_TITLE_LENGTH)),
+      }))
+    );
+
+    try {
+      const responseData = await requestGeminiAssignments(prompt, apiKey);
+      if (!Array.isArray(responseData?.assignments)) {
+        throw new Error("Gemini returned an invalid assignments payload");
+      }
+
+      const tabMap = new Map(tabRecords.map((record) => [record.id, record]));
+      const seenTabIds = new Set();
+
+      return responseData.assignments
+        .map((assignment) => {
+          if (
+            !assignment ||
+            typeof assignment.tabId !== "string" ||
+            typeof assignment.topic !== "string"
+          ) {
+            return null;
+          }
+
+          const tabRecord = tabMap.get(assignment.tabId);
+          if (!tabRecord || seenTabIds.has(assignment.tabId)) {
+            return null;
+          }
+
+          seenTabIds.add(assignment.tabId);
+          const canonicalExistingGroup =
+            existingGroupNameMap.get(normalizeTopicKey(assignment.topic)) || null;
+          const topic = canonicalExistingGroup
+            ? canonicalExistingGroup
+            : sanitizeTopicName(assignment.topic, tabRecord.title);
+
+          return topic
+            ? {
+                tab: tabRecord.tab,
+                topic,
+              }
+            : null;
+        })
+        .filter(Boolean);
+    } catch (error) {
+      console.error("[TabSort][Gemini] Error grouping tabs:", error);
+      return null;
+    }
+  };
+
+  const askLocalAIForMultipleTopics = async (tabs) => {
     if (!Array.isArray(tabs) || tabs.length === 0) return [];
 
     const validTabs = tabs.filter((tab) => tab?.isConnected);
@@ -416,26 +756,7 @@
     const ungroupedTabs = [];
 
     // Get existing groups in current workspace
-    const existingWorkspaceGroups = new Map();
-    if (currentWorkspaceId) {
-      const groupSelector = `tab-group:has(tab[zen-workspace-id="${currentWorkspaceId}"])`;
-      document.querySelectorAll(groupSelector).forEach((groupEl) => {
-        const label = groupEl.getAttribute("label");
-        if (label) {
-          // Get tabs in this group to calculate group embedding
-          const groupTabs = Array.from(groupEl.querySelectorAll('tab')).filter(tab => 
-            tab.getAttribute("zen-workspace-id") === currentWorkspaceId
-          );
-          if (groupTabs.length > 0) {
-            existingWorkspaceGroups.set(label, {
-              element: groupEl,
-              tabs: groupTabs,
-              tabTitles: groupTabs.map(tab => getTabTitle(tab))
-            });
-          }
-        }
-      });
-    }
+    const existingWorkspaceGroups = getExistingWorkspaceGroups(currentWorkspaceId);
 
     // Process tabs in batches for better performance
     const tabTitles = validTabs.map((tab) => getTabTitle(tab));
@@ -762,6 +1083,23 @@
     }
 
     return result;
+  };
+
+  const askAIForMultipleTopics = async (tabs) => {
+    const preferredProvider = getPreferredAIProvider();
+
+    if (preferredProvider === PROVIDERS.GEMINI) {
+      const geminiAssignments = await askGeminiForMultipleTopics(tabs);
+      if (Array.isArray(geminiAssignments)) {
+        return geminiAssignments;
+      }
+
+      console.warn(
+        "[TabSort] Falling back to Firefox local AI after Gemini was unavailable."
+      );
+    }
+
+    return askLocalAIForMultipleTopics(tabs);
   };
 
   // Animation cleanup utility

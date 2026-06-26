@@ -5,5 +5,34 @@
     "property": "browser.ml.enabled",
     "force": true,
     "defaultValue": true
+  },
+  {
+    "type": "dropdown",
+    "label": "AI Provider",
+    "property": "extension.zen-tidy-tabs.provider",
+    "defaultValue": "firefox-local",
+    "placeholder": false,
+    "options": [
+      {
+        "value": "firefox-local",
+        "label": "Firefox Local"
+      },
+      {
+        "value": "gemini",
+        "label": "Gemini"
+      }
+    ]
+  },
+  {
+    "type": "string",
+    "label": "Gemini API Key",
+    "property": "extension.zen-tidy-tabs.gemini-api-key",
+    "placeholder": "AIza...",
+    "conditions": {
+      "if": {
+        "property": "extension.zen-tidy-tabs.provider",
+        "value": "gemini"
+      }
+    }
   }
 ]
