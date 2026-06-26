@@ -1,0 +1,75 @@
+<svg width="1200" height="640" viewBox="0 0 1200 640" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="96" y1="64" x2="1084" y2="576" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#07111F"/>
+      <stop offset="0.45" stop-color="#10253F"/>
+      <stop offset="1" stop-color="#163A4A"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.06"/>
+    </linearGradient>
+    <linearGradient id="accentA" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#6EE7F9"/>
+      <stop offset="1" stop-color="#3B82F6"/>
+    </linearGradient>
+    <linearGradient id="accentB" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#F9A8D4"/>
+      <stop offset="1" stop-color="#C084FC"/>
+    </linearGradient>
+    <linearGradient id="accentC" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#86EFAC"/>
+      <stop offset="1" stop-color="#14B8A6"/>
+    </linearGradient>
+    <filter id="blur" x="0" y="0" width="1200" height="640" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="48"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="640" rx="36" fill="url(#bg)"/>
+  <g filter="url(#blur)" opacity="0.75">
+    <circle cx="220" cy="140" r="110" fill="#38BDF8"/>
+    <circle cx="972" cy="132" r="96" fill="#C084FC"/>
+    <circle cx="914" cy="478" r="118" fill="#14B8A6"/>
+  </g>
+
+  <rect x="64" y="64" width="1072" height="512" rx="28" fill="white" fill-opacity="0.05" stroke="white" stroke-opacity="0.14"/>
+
+  <text x="102" y="136" fill="white" font-family="Segoe UI, Arial, sans-serif" font-size="46" font-weight="700">Better Tidy Tabs</text>
+  <text x="102" y="176" fill="#C6D5EA" font-family="Segoe UI, Arial, sans-serif" font-size="22">From scattered tabs to clean task groups in one click.</text>
+
+  <rect x="98" y="224" width="288" height="272" rx="24" fill="url(#panel)" stroke="white" stroke-opacity="0.12"/>
+  <text x="126" y="264" fill="#EAF2FF" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="600">Before</text>
+  <text x="126" y="288" fill="#B9C8DE" font-family="Segoe UI, Arial, sans-serif" font-size="14">Loose tabs, mixed context, harder to navigate</text>
+
+  <rect x="126" y="318" width="220" height="34" rx="17" fill="white" fill-opacity="0.08"/>
+  <rect x="126" y="366" width="196" height="34" rx="17" fill="white" fill-opacity="0.08"/>
+  <rect x="126" y="414" width="232" height="34" rx="17" fill="white" fill-opacity="0.08"/>
+  <rect x="126" y="462" width="178" height="34" rx="17" fill="white" fill-opacity="0.08"/>
+  <circle cx="148" cy="335" r="7" fill="#94A3B8"/>
+  <circle cx="148" cy="383" r="7" fill="#94A3B8"/>
+  <circle cx="148" cy="431" r="7" fill="#94A3B8"/>
+  <circle cx="148" cy="479" r="7" fill="#94A3B8"/>
+
+  <path d="M426 360C486 360 490 320 548 320C604 320 608 398 666 398" stroke="url(#accentA)" stroke-width="10" stroke-linecap="round"/>
+  <path d="M426 404C500 404 514 450 574 450C626 450 648 416 666 416" stroke="url(#accentB)" stroke-width="10" stroke-linecap="round"/>
+
+  <rect x="714" y="200" width="388" height="320" rx="26" fill="white" fill-opacity="0.06" stroke="white" stroke-opacity="0.14"/>
+  <text x="744" y="240" fill="#EAF2FF" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="600">After</text>
+  <text x="744" y="264" fill="#B9C8DE" font-family="Segoe UI, Arial, sans-serif" font-size="14">Broader groups, clearer flow, less sidebar noise</text>
+
+  <rect x="744" y="296" width="146" height="168" rx="22" fill="url(#accentA)" fill-opacity="0.22" stroke="#6EE7F9" stroke-opacity="0.6"/>
+  <text x="768" y="328" fill="white" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Research</text>
+  <rect x="764" y="346" width="98" height="14" rx="7" fill="white" fill-opacity="0.85"/>
+  <rect x="764" y="372" width="82" height="14" rx="7" fill="white" fill-opacity="0.7"/>
+  <rect x="764" y="398" width="110" height="14" rx="7" fill="white" fill-opacity="0.65"/>
+
+  <rect x="916" y="296" width="146" height="168" rx="22" fill="url(#accentB)" fill-opacity="0.22" stroke="#F9A8D4" stroke-opacity="0.6"/>
+  <text x="940" y="328" fill="white" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Build</text>
+  <rect x="936" y="346" width="102" height="14" rx="7" fill="white" fill-opacity="0.85"/>
+  <rect x="936" y="372" width="78" height="14" rx="7" fill="white" fill-opacity="0.7"/>
+  <rect x="936" y="398" width="114" height="14" rx="7" fill="white" fill-opacity="0.65"/>
+
+  <rect x="830" y="478" width="146" height="28" rx="14" fill="url(#accentC)" fill-opacity="0.25" stroke="#86EFAC" stroke-opacity="0.55"/>
+  <text x="858" y="497" fill="white" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">Others</text>
+</svg>
