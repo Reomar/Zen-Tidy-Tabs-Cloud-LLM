@@ -602,6 +602,27 @@
     required: ["assignments"],
   };
 
+  const toGeminiSchema = (schema) => {
+    if (Array.isArray(schema)) {
+      return schema.map((item) => toGeminiSchema(item));
+    }
+
+    if (!schema || typeof schema !== "object") {
+      return schema;
+    }
+
+    const converted = {};
+    for (const [key, value] of Object.entries(schema)) {
+      if (key === "type" && typeof value === "string") {
+        converted[key] = value.toUpperCase();
+      } else {
+        converted[key] = toGeminiSchema(value);
+      }
+    }
+
+    return converted;
+  };
+
   const requestGeminiAssignments = async (prompt, apiKey) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(
@@ -627,12 +648,13 @@
             generationConfig: {
               temperature: 0.2,
               maxOutputTokens: GEMINI_CONFIG.MAX_OUTPUT_TOKENS,
-              responseFormat: {
-                text: {
+              responseFormat: [
+                {
+                  type: "text",
                   mimeType: "application/json",
-                  schema: GEMINI_ASSIGNMENTS_SCHEMA,
+                  schema: toGeminiSchema(GEMINI_ASSIGNMENTS_SCHEMA),
                 },
-              },
+              ],
             },
           }),
           signal: controller.signal,
@@ -640,7 +662,12 @@
       );
 
       if (!response.ok) {
-        throw new Error(`Gemini request failed with status ${response.status}`);
+        const errorText = await response.text().catch(() => "");
+        throw new Error(
+          `Gemini request failed with status ${response.status}${
+            errorText ? `: ${errorText}` : ""
+          }`
+        );
       }
 
       const responseData = await response.json();
