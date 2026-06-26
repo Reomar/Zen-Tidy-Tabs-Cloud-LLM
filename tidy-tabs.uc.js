@@ -8,6 +8,8 @@
   const CONFIG = {
     SIMILARITY_THRESHOLD: 0.45,
     GROUP_SIMILARITY_THRESHOLD: 0.65, // Lowered from 0.75 to be more inclusive for existing groups
+    FALLBACK_GROUP_SIMILARITY_THRESHOLD: 0.52,
+    FALLBACK_TITLE_SIMILARITY_THRESHOLD: 0.58,
     MIN_TABS_FOR_SORT: 6, // This is the ammount of tabs for the button to show, not the ammount of tabs you need in a group
     DEBOUNCE_DELAY: 250,
     ANIMATION_DURATION: 800,
@@ -469,6 +471,10 @@
 
       let bestMatch = null;
       let bestSimilarity = 0;
+      let bestEmbeddingFallbackMatch = null;
+      let bestEmbeddingFallbackSimilarity = 0;
+      let bestTitleFallbackMatch = null;
+      let bestTitleFallbackSimilarity = 0;
 
       // Check against current workspace groups
       for (const [groupName, groupInfo] of existingWorkspaceGroups) {
@@ -477,6 +483,16 @@
 
         let similarity = cosineSimilarity(tabEmbedding, groupEmbedding);
         similarity += CONFIG.EXISTING_GROUP_BOOST; // Always boost existing groups
+
+        if (similarity > bestEmbeddingFallbackSimilarity) {
+          bestEmbeddingFallbackMatch = {
+            groupData: { groupName },
+            similarity,
+            isExistingGroup: true,
+            matchType: "embedding-fallback",
+          };
+          bestEmbeddingFallbackSimilarity = similarity;
+        }
 
         if (similarity > CONFIG.GROUP_SIMILARITY_THRESHOLD && similarity > bestSimilarity) {
           bestMatch = { 
@@ -499,10 +515,21 @@
           });
 
           const maxTitleSimilarity = Math.max(...titleSimilarities);
+          const adjustedSimilarity =
+            maxTitleSimilarity * 0.8 + CONFIG.EXISTING_GROUP_BOOST;
+
+          if (adjustedSimilarity > bestTitleFallbackSimilarity) {
+            bestTitleFallbackMatch = {
+              groupData: { groupName },
+              similarity: adjustedSimilarity,
+              isExistingGroup: true,
+              matchType: "title-fallback",
+            };
+            bestTitleFallbackSimilarity = adjustedSimilarity;
+          }
           
           // If we find strong title similarity, consider it a match
           if (maxTitleSimilarity > 0.7) {
-            const adjustedSimilarity = maxTitleSimilarity * 0.8 + CONFIG.EXISTING_GROUP_BOOST;
             if (adjustedSimilarity > CONFIG.GROUP_SIMILARITY_THRESHOLD && adjustedSimilarity > bestSimilarity) {
               bestMatch = { 
                 groupData: { groupName }, 
@@ -513,6 +540,30 @@
               bestSimilarity = adjustedSimilarity;
             }
           }
+        }
+      }
+
+      if (!bestMatch) {
+        const fallbackCandidates = [
+          bestEmbeddingFallbackMatch,
+          bestTitleFallbackMatch,
+        ].filter(Boolean);
+
+        const fallbackMatch = fallbackCandidates.sort(
+          (a, b) => b.similarity - a.similarity
+        )[0];
+
+        if (
+          fallbackMatch &&
+          ((fallbackMatch.matchType === "embedding-fallback" &&
+            fallbackMatch.similarity >=
+              CONFIG.FALLBACK_GROUP_SIMILARITY_THRESHOLD) ||
+            (fallbackMatch.matchType === "title-fallback" &&
+              fallbackMatch.similarity >=
+                CONFIG.FALLBACK_TITLE_SIMILARITY_THRESHOLD))
+        ) {
+          bestMatch = fallbackMatch;
+          bestSimilarity = fallbackMatch.similarity;
         }
       }
 
