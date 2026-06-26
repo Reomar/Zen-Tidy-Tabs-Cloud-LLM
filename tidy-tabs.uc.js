@@ -32,7 +32,7 @@
   };
 
   const GEMINI_CONFIG = {
-    MODEL: "gemini-2.5-flash-lite",
+    MODELS: ["gemini-2.5-flash-lite", "gemini-2.5-flash"],
     MAX_TITLE_LENGTH: 120,
     MAX_PATH_HINT_LENGTH: 60,
     MAX_GROUP_SAMPLE_TITLES: 3,
@@ -1002,7 +1002,10 @@
     return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   };
 
-  const requestGeminiAssignments = async (prompt, apiKey) => {
+  const isRetryableGeminiStatus = (status) =>
+    [404, 408, 429, 500, 502, 503, 504].includes(status);
+
+  const requestGeminiAssignmentsForModel = async (prompt, apiKey, modelName) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(
       () => controller.abort(),
@@ -1011,7 +1014,7 @@
 
     try {
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_CONFIG.MODEL}:generateContent`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`,
         {
           method: "POST",
           headers: {
@@ -1035,23 +1038,71 @@
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => "");
-        throw new Error(
-          `Gemini request failed with status ${response.status}${
+        const error = new Error(
+          `Gemini request failed for ${modelName} with status ${response.status}${
             errorText ? `: ${errorText}` : ""
           }`
         );
+        error.status = response.status;
+        error.retryable = isRetryableGeminiStatus(response.status);
+        throw error;
       }
 
       const responseData = await response.json();
       const rawText = parseGeminiResponseText(responseData);
       if (!rawText) {
-        throw new Error("Gemini returned an empty response");
+        const error = new Error(`Gemini returned an empty response for ${modelName}`);
+        error.retryable = true;
+        throw error;
       }
 
       return JSON.parse(stripCodeFences(rawText));
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        const timeoutError = new Error(
+          `Gemini request timed out for ${modelName} after ${GEMINI_CONFIG.REQUEST_TIMEOUT_MS}ms`
+        );
+        timeoutError.retryable = true;
+        throw timeoutError;
+      }
+      throw error;
     } finally {
       clearTimeout(timeoutId);
     }
+  };
+
+  const requestGeminiAssignments = async (prompt, apiKey) => {
+    let lastError = null;
+
+    for (let index = 0; index < GEMINI_CONFIG.MODELS.length; index++) {
+      const modelName = GEMINI_CONFIG.MODELS[index];
+      try {
+        const result = await requestGeminiAssignmentsForModel(
+          prompt,
+          apiKey,
+          modelName
+        );
+        console.log(`[TabSort][Gemini] Grouping succeeded with ${modelName}.`);
+        return result;
+      } catch (error) {
+        lastError = error;
+        const hasMoreModels = index < GEMINI_CONFIG.MODELS.length - 1;
+
+        console.warn(
+          `[TabSort][Gemini] ${modelName} failed: ${error?.message || error}`
+        );
+
+        if (!hasMoreModels || !error?.retryable) {
+          throw error;
+        }
+
+        console.warn(
+          `[TabSort][Gemini] Retrying with fallback model ${GEMINI_CONFIG.MODELS[index + 1]}.`
+        );
+      }
+    }
+
+    throw lastError || new Error("Gemini request failed for all configured models");
   };
 
   const askGeminiForMultipleTopics = async (tabs) => {
