@@ -5,6 +5,8 @@
   const {
     batchDOMUpdates,
     buildProviderContext,
+    consumeProviderFeedback,
+    formatProviderLabel,
     getPreferredAIProvider,
     getFilteredTabs,
     normalizeTopicKey,
@@ -31,9 +33,42 @@
     const preferredProvider = ns.getProvider(preferredProviderId) || localProvider;
 
     if (preferredProvider.id !== PROVIDERS.FIREFOX_LOCAL) {
-      const cloudAssignments = await preferredProvider.assignTopics(context);
+      let cloudAssignments = null;
+      let feedback = null;
+
+      try {
+        cloudAssignments = await preferredProvider.assignTopics(context);
+      } catch (error) {
+        console.error(
+          `[TabSort][${formatProviderLabel(preferredProvider.id)}] Error grouping tabs:`,
+          error
+        );
+
+        if (preferredProvider.id === PROVIDERS.OPENROUTER) {
+          feedback = {
+            providerId: preferredProvider.id,
+            title: formatProviderLabel(preferredProvider.id),
+            message:
+              error?.userMessage ||
+              "OpenRouter failed. Using Firefox local AI instead.",
+          };
+        }
+      }
+
       if (Array.isArray(cloudAssignments)) {
         return cloudAssignments;
+      }
+
+      feedback ||= consumeProviderFeedback();
+      if (
+        feedback?.message &&
+        typeof ns.showRuntimeToast === "function"
+      ) {
+        ns.showRuntimeToast({
+          id: `better-tidy-tabs-${feedback.providerId || preferredProvider.id}-error`,
+          title: feedback.title || formatProviderLabel(preferredProvider.id),
+          message: feedback.message,
+        });
       }
 
       console.warn(

@@ -1,8 +1,22 @@
 (() => {
   // Provide shared AI helpers such as embeddings, caching, prefs, and context building.
   const ns = window.BetterTidyTabs;
-  const { CONFIG, PROVIDERS, PREFS, state } = ns;
-  const { getTabTitle, getFilteredTabs } = ns;
+  const {
+    CONFIG,
+    PROVIDERS,
+    PREFS,
+    state,
+    CLOUD_PROMPT_CONFIG,
+    ATG_ICON_CATALOG,
+  } = ns;
+  const {
+    getTabNavigationInfo,
+    getTabTitle,
+    getFilteredTabs,
+    getIconCatalogPromptText,
+    normalizeIconId,
+    truncateText,
+  } = ns;
 
   // Average token or chunk embeddings into one normalized vector.
   function averageEmbedding(arrays) {
@@ -69,10 +83,17 @@
       const group = [index];
       used.add(index);
 
-      for (let compareIndex = index + 1; compareIndex < vectors.length; compareIndex++) {
+      for (
+        let compareIndex = index + 1;
+        compareIndex < vectors.length;
+        compareIndex++
+      ) {
         if (used.has(compareIndex)) continue;
 
-        const similarity = cosineSimilarity(vectors[index], vectors[compareIndex]);
+        const similarity = cosineSimilarity(
+          vectors[index],
+          vectors[compareIndex]
+        );
         if (similarity >= threshold) {
           group.push(compareIndex);
           used.add(compareIndex);
@@ -200,7 +221,9 @@
         pooled.length > 0 &&
         typeof pooled[0] === "number"
       ) {
-        const norm = Math.sqrt(pooled.reduce((sum, value) => sum + value * value, 0));
+        const norm = Math.sqrt(
+          pooled.reduce((sum, value) => sum + value * value, 0)
+        );
         return norm === 0 ? pooled : pooled.map((value) => value / norm);
       }
 
@@ -227,6 +250,24 @@
   const getGeminiApiKey = () => {
     try {
       return Services.prefs.getStringPref(PREFS.GEMINI_API_KEY, "").trim();
+    } catch {
+      return "";
+    }
+  };
+
+  // Read and trim the OpenRouter API key from Firefox prefs.
+  const getOpenRouterApiKey = () => {
+    try {
+      return Services.prefs.getStringPref(PREFS.OPENROUTER_API_KEY, "").trim();
+    } catch {
+      return "";
+    }
+  };
+
+  // Read and trim the user-selected OpenRouter model name from Firefox prefs.
+  const getOpenRouterModel = () => {
+    try {
+      return Services.prefs.getStringPref(PREFS.OPENROUTER_MODEL, "").trim();
     } catch {
       return "";
     }
@@ -288,6 +329,201 @@
     };
   };
 
+  // Turn live tabs into the compact records used by cloud prompts and response mapping.
+  const buildCloudTabRecords = (tabs) =>
+    tabs.map((tab, index) => {
+      const navigationInfo = getTabNavigationInfo(tab);
+      return {
+        id: `t${index + 1}`,
+        tab,
+        title: truncateText(
+          getTabTitle(tab),
+          CLOUD_PROMPT_CONFIG.MAX_TITLE_LENGTH
+        ),
+        host: navigationInfo.host,
+        pathHint: truncateText(
+          navigationInfo.pathHint,
+          CLOUD_PROMPT_CONFIG.MAX_PATH_HINT_LENGTH
+        ),
+      };
+    });
+
+  // Turn existing groups into compact prompt records shared by cloud providers.
+  const buildExistingGroupPromptRecords = (existingWorkspaceGroups) =>
+    Array.from(existingWorkspaceGroups.entries()).map(([groupName, groupInfo]) => ({
+      name: groupName,
+      sampleTitles: groupInfo.tabTitles
+        .slice(0, CLOUD_PROMPT_CONFIG.MAX_GROUP_SAMPLE_TITLES)
+        .map((title) =>
+          truncateText(title, CLOUD_PROMPT_CONFIG.MAX_TITLE_LENGTH)
+        ),
+    }));
+
+  // Build the provider-agnostic grouping prompt used by cloud models.
+  const buildCloudAssignmentsPrompt = (tabRecords, existingGroups) => {
+    const existingGroupsText =
+      existingGroups.length === 0
+        ? "None"
+        : existingGroups
+            .map(
+              (group) =>
+                `${group.name}: ${group.sampleTitles.join(" | ") || "No samples"}`
+            )
+            .join("\n");
+
+    const tabsText = tabRecords
+      .map((tab) => {
+        const parts = [`${tab.id}`, tab.title];
+        if (tab.host) parts.push(`host=${tab.host}`);
+        if (tab.pathHint) parts.push(`path=${tab.pathHint}`);
+        return parts.join(" | ");
+      })
+      .join("\n");
+
+    return [
+      "Group browser tabs by browsing task or topic.",
+      "Create as few groups as reasonably possible while still keeping them useful.",
+      "Prefer broad task-oriented groups over narrow repo-name or page-name groups.",
+      "You must decide the final grouping yourself from the provided tabs and existing groups.",
+      "Reuse an existing group only when it is clearly the best fit, and use the exact existing group name when you do.",
+      "Use concise title-case task names with at most 24 characters.",
+      "Never create a new group for a single tab.",
+      "Any tab that does not clearly belong with at least one other tab must be assigned to Others.",
+      "Prefer Others over creating a narrow, speculative, or weakly supported group.",
+      "Prefer merging closely related tabs into a broader topic instead of creating another small group.",
+      "Favor useful work-context grouping over literal title similarity.",
+      "Choose exactly one iconId for each assignment from the supported icon catalog below.",
+      'Return only valid JSON with this exact shape: {"assignments":[{"tabId":"t1","topic":"Example","iconId":"folder"}]}.',
+      "Do not include markdown fences, prose, explanations, or extra keys.",
+      "",
+      "Supported icons:",
+      getIconCatalogPromptText(),
+      "",
+      "Existing groups:",
+      existingGroupsText,
+      "",
+      "Tabs:",
+      tabsText,
+    ].join("\n");
+  };
+
+  // Remove markdown fences when a model wraps JSON in formatting.
+  const stripCodeFences = (text) => {
+    if (!text || typeof text !== "string") return "";
+    return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  };
+
+  // Extract the outer JSON object from model output that may include extra text.
+  const extractJsonObjectText = (text) => {
+    if (!text || typeof text !== "string") return "";
+
+    const trimmed = text.trim();
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+      return trimmed;
+    }
+
+    return trimmed.slice(firstBrace, lastBrace + 1);
+  };
+
+  // Parse a model text response into the expected assignments JSON payload.
+  const parseAssignmentsPayloadText = (text) =>
+    JSON.parse(extractJsonObjectText(stripCodeFences(text)));
+
+  // Scale cloud output tokens with the number of tabs and existing groups in context.
+  const getCloudMaxOutputTokens = (tabCount, existingGroupCount = 0) =>
+    Math.min(
+      CLOUD_PROMPT_CONFIG.MAX_OUTPUT_TOKENS,
+      Math.max(
+        CLOUD_PROMPT_CONFIG.BASE_OUTPUT_TOKENS,
+        CLOUD_PROMPT_CONFIG.BASE_OUTPUT_TOKENS +
+          tabCount * CLOUD_PROMPT_CONFIG.OUTPUT_TOKENS_PER_TAB +
+          existingGroupCount *
+            CLOUD_PROMPT_CONFIG.OUTPUT_TOKENS_PER_EXISTING_GROUP
+      )
+    );
+
+  // Convert provider assignment payloads into live tab-topic records for sorting.
+  const mapProviderAssignments = (assignments, tabRecords) => {
+    const tabMap = new Map(tabRecords.map((record) => [record.id, record]));
+    const seenTabIds = new Set();
+
+    return assignments
+      .map((assignment) => {
+        if (
+          !assignment ||
+          typeof assignment.tabId !== "string" ||
+          typeof assignment.topic !== "string"
+        ) {
+          return null;
+        }
+
+        const tabRecord = tabMap.get(assignment.tabId);
+        if (!tabRecord || seenTabIds.has(assignment.tabId)) {
+          return null;
+        }
+
+        seenTabIds.add(assignment.tabId);
+        return {
+          tab: tabRecord.tab,
+          topic: assignment.topic,
+          iconId:
+            typeof assignment.iconId === "string"
+              ? normalizeIconId(assignment.iconId)
+              : "",
+        };
+      })
+      .filter(Boolean);
+  };
+
+  // Store the last provider feedback so the sorting layer can show it once.
+  const setProviderFeedback = (feedback) => {
+    state.lastProviderFeedback = feedback || null;
+  };
+
+  // Consume the last provider feedback so it is not shown more than once.
+  const consumeProviderFeedback = () => {
+    const feedback = state.lastProviderFeedback;
+    state.lastProviderFeedback = null;
+    return feedback;
+  };
+
+  // Format provider ids into short user-facing labels for logs and toasts.
+  const formatProviderLabel = (providerId) => {
+    switch (providerId) {
+      case PROVIDERS.GEMINI:
+        return "Gemini";
+      case PROVIDERS.OPENROUTER:
+        return "OpenRouter";
+      case PROVIDERS.FIREFOX_LOCAL:
+        return "Firefox local AI";
+      default:
+        return providerId || "AI provider";
+    }
+  };
+
+  // Create a provider error with both console detail and a user-facing message.
+  const createProviderError = (
+    providerId,
+    userMessage,
+    { cause = null, retryable = false, status = null, rawTextPreview = "" } = {}
+  ) => {
+    const error = new Error(userMessage);
+    error.providerId = providerId;
+    error.userMessage = userMessage;
+    error.retryable = retryable;
+    error.status = status;
+    error.rawTextPreview = rawTextPreview;
+    error.cause = cause;
+    return error;
+  };
+
+  // Validate the generic assignments shape returned by a cloud provider.
+  const hasValidAssignmentsPayload = (payload) =>
+    Array.isArray(payload?.assignments);
+
   Object.assign(ns, {
     averageEmbedding,
     cosineSimilarity,
@@ -300,7 +536,22 @@
     generateEmbedding,
     getPreferredAIProvider,
     getGeminiApiKey,
+    getOpenRouterApiKey,
+    getOpenRouterModel,
     getExistingWorkspaceGroups,
     buildProviderContext,
+    buildCloudTabRecords,
+    buildExistingGroupPromptRecords,
+    buildCloudAssignmentsPrompt,
+    stripCodeFences,
+    extractJsonObjectText,
+    parseAssignmentsPayloadText,
+    getCloudMaxOutputTokens,
+    mapProviderAssignments,
+    setProviderFeedback,
+    consumeProviderFeedback,
+    formatProviderLabel,
+    createProviderError,
+    hasValidAssignmentsPayload,
   });
 })();

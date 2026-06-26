@@ -87,6 +87,97 @@
     updateButtonsVisibilityState();
   }
 
+  // Show a short runtime toast for provider failures and other user-visible issues.
+  const showRuntimeToast = ({
+    id = "better-tidy-tabs-runtime-toast",
+    title = "Better Tidy Tabs",
+    message = "",
+    duration = 3500,
+  }) => {
+    if (!message) {
+      return;
+    }
+
+    const toastManager =
+      document.querySelector(".sineToastManager") || document.body;
+    if (!toastManager) {
+      console.warn("[TabSort] Toast manager is unavailable:", message);
+      return;
+    }
+
+    const existingToast = toastManager.querySelector(
+      `.sineToast[data-id="${id}"]`
+    );
+    if (existingToast) {
+      existingToast.remove();
+    }
+
+    const toast = document.createElement("div");
+    toast.className = "sineToast";
+    toast.dataset.id = id;
+    toast.innerHTML = `
+      <div>
+        <span></span>
+        <span class="description"></span>
+      </div>
+    `;
+
+    const titleElement = toast.querySelector("span");
+    const descriptionElement = toast.querySelector(".description");
+    titleElement.textContent = title;
+    descriptionElement.textContent = message;
+    toastManager.appendChild(toast);
+
+    const removeToast = () => {
+      if (!toast.isConnected) {
+        return;
+      }
+
+      toast
+        .animate(
+          [
+            { transform: "translateY(0%) scale(1)", opacity: 1 },
+            { transform: "translateY(120%) scale(0.8)", opacity: 0 },
+          ],
+          {
+            duration: 250,
+            easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+            fill: "forwards",
+          }
+        )
+        .finished.then(() => toast.remove())
+        .catch(() => toast.remove());
+    };
+
+    let timeoutId = null;
+    const startTimeout = () => {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+      timeoutId = window.setTimeout(removeToast, duration);
+    };
+
+    toast.animate(
+      [
+        { transform: "translateY(120%) scale(0.8)", opacity: 0 },
+        { transform: "translateY(0%) scale(1)", opacity: 1 },
+      ],
+      {
+        duration: 300,
+        fill: "forwards",
+        easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+      }
+    );
+
+    toast.addEventListener("mouseenter", () => {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+    });
+    toast.addEventListener("mouseleave", startTimeout);
+    startTimeout();
+  };
+
   // Start the normal sort-in-progress wave animation on the active separator.
   const startSortWaveAnimation = (separator) => {
     const pathElement = separator?.querySelector("#separator-path");
@@ -637,6 +728,7 @@
   Object.assign(ns, {
     ensureSortButtonExists,
     addSortButtonToAllSeparators,
+    showRuntimeToast,
     setupSortCommandAndListener,
     setupgZenWorkspacesHooks,
     patchClearButtonToPreserveGroups,

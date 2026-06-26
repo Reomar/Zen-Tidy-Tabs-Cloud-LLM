@@ -16,15 +16,17 @@
   ns.PROVIDERS = {
     FIREFOX_LOCAL: "firefox-local",
     GEMINI: "gemini",
+    OPENROUTER: "openrouter",
   };
 
   ns.PREFS = {
     PROVIDER: "extension.zen-tidy-tabs.provider",
     GEMINI_API_KEY: "extension.zen-tidy-tabs.gemini-api-key",
+    OPENROUTER_API_KEY: "extension.zen-tidy-tabs.openrouter-api-key",
+    OPENROUTER_MODEL: "extension.zen-tidy-tabs.openrouter-model",
   };
 
-  ns.GEMINI_CONFIG = {
-    MODELS: ["gemini-3.5-flash", "gemini-3.1-flash-lite"],
+  ns.CLOUD_PROMPT_CONFIG = {
     MAX_TITLE_LENGTH: 120,
     MAX_PATH_HINT_LENGTH: 60,
     MAX_GROUP_SAMPLE_TITLES: 3,
@@ -33,7 +35,22 @@
     MAX_OUTPUT_TOKENS: 2048,
     OUTPUT_TOKENS_PER_TAB: 24,
     OUTPUT_TOKENS_PER_EXISTING_GROUP: 12,
+  };
+
+  ns.GEMINI_CONFIG = {
+    MODELS: ["gemini-3.5-flash", "gemini-3.1-flash-lite"],
     REQUEST_TIMEOUT_MS: 15000,
+  };
+
+  ns.OPENROUTER_CONFIG = {
+    API_URL: "https://openrouter.ai/api/v1/chat/completions",
+    APP_URL: "https://github.com/Reomar/better-tidy-tabs",
+    APP_TITLE: "Better Tidy Tabs",
+    REQUEST_TIMEOUT_MS: 60000,
+    BASE_OUTPUT_TOKENS: 320,
+    MAX_OUTPUT_TOKENS: 1024,
+    OUTPUT_TOKENS_PER_TAB: 14,
+    OUTPUT_TOKENS_PER_EXISTING_GROUP: 8,
   };
 
   ns.ATG_ICON_CATALOG = {
@@ -157,6 +174,7 @@
     clearPatchInstalled: false,
     clearButtonOriginal: null,
     initIntervalId: null,
+    lastProviderFeedback: null,
     initialized: false,
   };
 

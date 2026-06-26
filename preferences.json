@@ -8,25 +8,41 @@
   },
   {
     "type": "dropdown",
-    "label": "AI Provider",
+    "label": "Sorting Engine",
     "property": "extension.zen-tidy-tabs.provider",
     "defaultValue": "firefox-local",
     "placeholder": false,
     "options": [
       {
         "value": "firefox-local",
-        "label": "Firefox Local"
+        "label": "Firefox Local AI"
       },
       {
         "value": "gemini",
-        "label": "Gemini"
+        "label": "Google Gemini"
+      },
+      {
+        "value": "openrouter",
+        "label": "OpenRouter"
       }
     ]
   },
   {
     "type": "string",
-    "label": "Gemini API Key (used only for Gemini)",
+    "label": "Gemini API Key",
     "property": "extension.zen-tidy-tabs.gemini-api-key",
     "placeholder": "AIza..."
+  },
+  {
+    "type": "string",
+    "label": "OpenRouter API Key",
+    "property": "extension.zen-tidy-tabs.openrouter-api-key",
+    "placeholder": "sk-or-v1-..."
+  },
+  {
+    "type": "string",
+    "label": "OpenRouter Model Name",
+    "property": "extension.zen-tidy-tabs.openrouter-model",
+    "placeholder": "google/gemma-4-27b-it:free"
   }
 ]

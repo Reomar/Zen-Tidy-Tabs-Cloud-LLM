@@ -13,6 +13,7 @@
     "20-ai-common.js",
     "30-provider-gemini.js",
     "31-provider-local.js",
+    "32-provider-openrouter.js",
     "40-sorting.js",
     "50-ui.js",
   ];

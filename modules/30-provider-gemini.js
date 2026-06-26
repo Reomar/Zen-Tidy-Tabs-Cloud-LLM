@@ -3,59 +3,21 @@
   const ns = window.BetterTidyTabs;
   const { PROVIDERS, GEMINI_CONFIG } = ns;
   const {
-    getGeminiApiKey,
-    getTabNavigationInfo,
-    getTabTitle,
-    truncateText,
+    buildCloudAssignmentsPrompt,
+    buildCloudTabRecords,
+    buildExistingGroupPromptRecords,
+    createProviderError,
+    getCloudMaxOutputTokens,
     getExistingWorkspaceGroups,
-    getIconCatalogPromptText,
-    normalizeIconId,
+    getGeminiApiKey,
+    hasValidAssignmentsPayload,
+    mapProviderAssignments,
+    parseAssignmentsPayloadText,
   } = ns;
 
   // Build the full Gemini prompt from tabs, existing groups, and icon choices.
-  const buildGeminiPrompt = (tabRecords, existingGroups) => {
-    const existingGroupsText =
-      existingGroups.length === 0
-        ? "None"
-        : existingGroups
-            .map(
-              (group) =>
-                `${group.name}: ${group.sampleTitles.join(" | ") || "No samples"}`
-            )
-            .join("\n");
-
-    const tabsText = tabRecords
-      .map((tab) => {
-        const parts = [`${tab.id}`, tab.title];
-        if (tab.host) parts.push(`host=${tab.host}`);
-        if (tab.pathHint) parts.push(`path=${tab.pathHint}`);
-        return parts.join(" | ");
-      })
-      .join("\n");
-
-    return [
-      "Group browser tabs by browsing task or topic.",
-      "Prefer broad task-oriented groups over narrow repo-name or page-name groups.",
-      "You must decide the final grouping yourself from the provided tabs and existing groups.",
-      "Reuse an existing group only when it is clearly the best fit, and use the exact existing group name when you do.",
-      "Use concise title-case task names with at most 24 characters.",
-      "Do not create singleton niche groups unless a tab genuinely deserves its own group.",
-      "Put weak, isolated, or miscellaneous tabs into Others.",
-      "Favor useful work-context grouping over literal title similarity.",
-      "Choose exactly one iconId for each assignment from the supported icon catalog below.",
-      'Return only valid JSON with this exact shape: {"assignments":[{"tabId":"t1","topic":"Example","iconId":"folder"}]}.',
-      "Do not include markdown fences, prose, explanations, or extra keys.",
-      "",
-      "Supported icons:",
-      getIconCatalogPromptText(),
-      "",
-      "Existing groups:",
-      existingGroupsText,
-      "",
-      "Tabs:",
-      tabsText,
-    ].join("\n");
-  };
+  const buildGeminiPrompt = (tabRecords, existingGroups) =>
+    buildCloudAssignmentsPrompt(tabRecords, existingGroups);
 
   // Flatten Gemini response parts into one plain text payload.
   const parseGeminiResponseText = (responseData) => {
@@ -66,39 +28,6 @@
       .join("")
       .trim();
   };
-
-  // Remove markdown code fences when a model wraps JSON in formatting.
-  const stripCodeFences = (text) => {
-    if (!text || typeof text !== "string") return "";
-    return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  };
-
-  // Extract the outer JSON object from a noisy model response.
-  const extractJsonObjectText = (text) => {
-    if (!text || typeof text !== "string") return "";
-
-    const trimmed = text.trim();
-    const firstBrace = trimmed.indexOf("{");
-    const lastBrace = trimmed.lastIndexOf("}");
-
-    if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
-      return trimmed;
-    }
-
-    return trimmed.slice(firstBrace, lastBrace + 1);
-  };
-
-  // Scale output tokens with the number of tabs and existing groups in context.
-  const getGeminiMaxOutputTokens = (tabCount, existingGroupCount = 0) =>
-    Math.min(
-      GEMINI_CONFIG.MAX_OUTPUT_TOKENS,
-      Math.max(
-        GEMINI_CONFIG.BASE_OUTPUT_TOKENS,
-        GEMINI_CONFIG.BASE_OUTPUT_TOKENS +
-          tabCount * GEMINI_CONFIG.OUTPUT_TOKENS_PER_TAB +
-          existingGroupCount * GEMINI_CONFIG.OUTPUT_TOKENS_PER_EXISTING_GROUP
-      )
-    );
 
   // Mark HTTP statuses that should trigger a retry or fallback model.
   const isRetryableGeminiStatus = (status) =>
@@ -134,8 +63,8 @@
     };
 
     if (useStructuredOutput) {
-      // Cloud providers should return machine-readable assignments so the sort
-      // layer can stay provider-agnostic and avoid natural-language parsing.
+      // Gemini can sometimes enforce JSON schema output directly, which reduces
+      // parse failures when the model variant supports the field.
       generationConfig.responseFormat = {
         text: {
           mimeType: "application/json",
@@ -194,45 +123,50 @@
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => "");
-        const error = new Error(
-          `Gemini request failed for ${modelName} with status ${response.status}${
-            errorText ? `: ${errorText}` : ""
-          }`
-        );
-        error.status = response.status;
-        error.retryable = isRetryableGeminiStatus(response.status);
+        const error = createProviderError(PROVIDERS.GEMINI, "", {
+          status: response.status,
+          retryable: isRetryableGeminiStatus(response.status),
+          rawTextPreview: errorText.slice(0, 300),
+        });
+        error.message = `Gemini request failed for ${modelName} with status ${response.status}${
+          errorText ? `: ${errorText}` : ""
+        }`;
         throw error;
       }
 
       const responseData = await response.json();
       const rawText = parseGeminiResponseText(responseData);
       if (!rawText) {
-        const error = new Error(`Gemini returned an empty response for ${modelName}`);
-        error.retryable = true;
-        throw error;
+        throw createProviderError(
+          PROVIDERS.GEMINI,
+          `Gemini returned an empty response for ${modelName}`,
+          { retryable: true }
+        );
       }
 
-      const cleanedText = extractJsonObjectText(stripCodeFences(rawText));
-
       try {
-        return JSON.parse(cleanedText);
+        return parseAssignmentsPayloadText(rawText);
       } catch (parseError) {
         const finishReason = responseData?.candidates?.[0]?.finishReason;
-        const error = new SyntaxError(
-          `Gemini returned invalid JSON for ${modelName}: ${parseError.message}`
+        const error = createProviderError(
+          PROVIDERS.GEMINI,
+          `Gemini returned invalid JSON for ${modelName}: ${parseError.message}`,
+          {
+            cause: parseError,
+            retryable: true,
+            rawTextPreview: rawText.slice(0, 300),
+          }
         );
-        error.retryable = true;
         error.finishReason = finishReason;
-        error.rawTextPreview = cleanedText.slice(0, 300);
         throw error;
       }
     } catch (error) {
       if (error?.name === "AbortError") {
-        const timeoutError = new Error(
-          `Gemini request timed out for ${modelName} after ${GEMINI_CONFIG.REQUEST_TIMEOUT_MS}ms`
+        throw createProviderError(
+          PROVIDERS.GEMINI,
+          `Gemini request timed out for ${modelName} after ${GEMINI_CONFIG.REQUEST_TIMEOUT_MS}ms`,
+          { retryable: true }
         );
-        timeoutError.retryable = true;
-        throw timeoutError;
       }
 
       throw error;
@@ -249,7 +183,10 @@
     existingGroupCount
   ) => {
     let lastError = null;
-    const maxOutputTokens = getGeminiMaxOutputTokens(tabCount, existingGroupCount);
+    const maxOutputTokens = getCloudMaxOutputTokens(
+      tabCount,
+      existingGroupCount
+    );
 
     for (let index = 0; index < GEMINI_CONFIG.MODELS.length; index++) {
       const modelName = GEMINI_CONFIG.MODELS[index];
@@ -339,75 +276,27 @@
     const existingWorkspaceGroups =
       context.existingWorkspaceGroups ||
       getExistingWorkspaceGroups(currentWorkspaceId);
-
-    const tabRecords = context.tabs.map((tab, index) => {
-      const navigationInfo = getTabNavigationInfo(tab);
-      return {
-        id: `t${index + 1}`,
-        tab,
-        title: truncateText(getTabTitle(tab), GEMINI_CONFIG.MAX_TITLE_LENGTH),
-        host: navigationInfo.host,
-        pathHint: truncateText(
-          navigationInfo.pathHint,
-          GEMINI_CONFIG.MAX_PATH_HINT_LENGTH
-        ),
-      };
-    });
-
+    const tabRecords = buildCloudTabRecords(context.tabs);
     const prompt = buildGeminiPrompt(
       tabRecords,
-      Array.from(existingWorkspaceGroups.entries()).map(([groupName, groupInfo]) => ({
-        name: groupName,
-        sampleTitles: groupInfo.tabTitles
-          .slice(0, GEMINI_CONFIG.MAX_GROUP_SAMPLE_TITLES)
-          .map((title) => truncateText(title, GEMINI_CONFIG.MAX_TITLE_LENGTH)),
-      }))
+      buildExistingGroupPromptRecords(existingWorkspaceGroups)
     );
 
-    try {
-      const responseData = await requestGeminiAssignments(
-        prompt,
-        apiKey,
-        tabRecords.length,
-        existingWorkspaceGroups.size
+    const responseData = await requestGeminiAssignments(
+      prompt,
+      apiKey,
+      tabRecords.length,
+      existingWorkspaceGroups.size
+    );
+
+    if (!hasValidAssignmentsPayload(responseData)) {
+      throw createProviderError(
+        PROVIDERS.GEMINI,
+        "Gemini returned an invalid assignments payload"
       );
-      if (!Array.isArray(responseData?.assignments)) {
-        throw new Error("Gemini returned an invalid assignments payload");
-      }
-
-      const tabMap = new Map(tabRecords.map((record) => [record.id, record]));
-      const seenTabIds = new Set();
-
-      return responseData.assignments
-        .map((assignment) => {
-          if (
-            !assignment ||
-            typeof assignment.tabId !== "string" ||
-            typeof assignment.topic !== "string"
-          ) {
-            return null;
-          }
-
-          const tabRecord = tabMap.get(assignment.tabId);
-          if (!tabRecord || seenTabIds.has(assignment.tabId)) {
-            return null;
-          }
-
-          seenTabIds.add(assignment.tabId);
-          return {
-            tab: tabRecord.tab,
-            topic: assignment.topic,
-            iconId:
-              typeof assignment.iconId === "string"
-                ? normalizeIconId(assignment.iconId)
-                : "",
-          };
-        })
-        .filter(Boolean);
-    } catch (error) {
-      console.error("[TabSort][Gemini] Error grouping tabs:", error);
-      return null;
     }
+
+    return mapProviderAssignments(responseData.assignments, tabRecords);
   };
 
   ns.registerProvider({

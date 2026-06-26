@@ -1,7 +1,7 @@
 (() => {
   // Provide shared tab, text, icon, and grouping helpers used across modules.
   const ns = window.BetterTidyTabs;
-  const { GEMINI_CONFIG, ATG_ICON_CATALOG, ATG_ICON_KEYWORDS } = ns;
+  const { CLOUD_PROMPT_CONFIG, ATG_ICON_CATALOG, ATG_ICON_KEYWORDS } = ns;
 
   // Return tabs from the active workspace that match the requested filters.
   const getFilteredTabs = (workspaceId, options = {}) => {
@@ -160,7 +160,7 @@
       .replace(/^['"`]+|['"`]+$/g, "")
       .replace(/[.?!,:;]+$/g, "")
       .trim()
-      .slice(0, GEMINI_CONFIG.MAX_GROUP_NAME_LENGTH);
+      .slice(0, CLOUD_PROMPT_CONFIG.MAX_GROUP_NAME_LENGTH);
 
     return cleaned || safeFallback;
   };
