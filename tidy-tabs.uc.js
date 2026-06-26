@@ -32,12 +32,15 @@
   };
 
   const GEMINI_CONFIG = {
-    MODELS: ["gemini-2.5-flash-lite", "gemini-2.5-flash"],
+    MODELS: ["gemini-3.5-flash", "gemini-3.1-flash-lite"],
     MAX_TITLE_LENGTH: 120,
     MAX_PATH_HINT_LENGTH: 60,
     MAX_GROUP_SAMPLE_TITLES: 3,
     MAX_GROUP_NAME_LENGTH: 24,
-    MAX_OUTPUT_TOKENS: 512,
+    BASE_OUTPUT_TOKENS: 512,
+    MAX_OUTPUT_TOKENS: 2048,
+    OUTPUT_TOKENS_PER_TAB: 24,
+    OUTPUT_TOKENS_PER_EXISTING_GROUP: 12,
     REQUEST_TIMEOUT_MS: 15000,
   };
 
@@ -1002,10 +1005,83 @@
     return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   };
 
+  const extractJsonObjectText = (text) => {
+    if (!text || typeof text !== "string") return "";
+
+    const trimmed = text.trim();
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+      return trimmed;
+    }
+
+    return trimmed.slice(firstBrace, lastBrace + 1);
+  };
+
+  const getGeminiMaxOutputTokens = (tabCount, existingGroupCount = 0) =>
+    Math.min(
+      GEMINI_CONFIG.MAX_OUTPUT_TOKENS,
+      Math.max(
+        GEMINI_CONFIG.BASE_OUTPUT_TOKENS,
+        GEMINI_CONFIG.BASE_OUTPUT_TOKENS +
+          tabCount * GEMINI_CONFIG.OUTPUT_TOKENS_PER_TAB +
+          existingGroupCount * GEMINI_CONFIG.OUTPUT_TOKENS_PER_EXISTING_GROUP
+      )
+    );
+
   const isRetryableGeminiStatus = (status) =>
     [404, 408, 429, 500, 502, 503, 504].includes(status);
 
-  const requestGeminiAssignmentsForModel = async (prompt, apiKey, modelName) => {
+  const GEMINI_ASSIGNMENTS_SCHEMA = {
+    type: "OBJECT",
+    properties: {
+      assignments: {
+        type: "ARRAY",
+        items: {
+          type: "OBJECT",
+          properties: {
+            tabId: { type: "STRING" },
+            topic: { type: "STRING" },
+          },
+          required: ["tabId", "topic"],
+        },
+      },
+    },
+    required: ["assignments"],
+  };
+
+  const buildGeminiGenerationConfig = (maxOutputTokens, useStructuredOutput = true) => {
+    const generationConfig = {
+      temperature: 0.2,
+      maxOutputTokens,
+    };
+
+    if (useStructuredOutput) {
+      generationConfig.responseFormat = {
+        text: {
+          mimeType: "application/json",
+          schema: GEMINI_ASSIGNMENTS_SCHEMA,
+        },
+      };
+    }
+
+    return generationConfig;
+  };
+
+  const shouldRetryGeminiWithoutStructuredOutput = (error) =>
+    error?.status === 400 &&
+    /responseformat|mime[_ ]?type|schema|invalid json payload|invalid value/i.test(
+      error?.message || ""
+    );
+
+  const requestGeminiAssignmentsForModel = async (
+    prompt,
+    apiKey,
+    modelName,
+    maxOutputTokens,
+    useStructuredOutput = true
+  ) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(
       () => controller.abort(),
@@ -1027,10 +1103,10 @@
                 parts: [{ text: prompt }],
               },
             ],
-            generationConfig: {
-              temperature: 0.2,
-              maxOutputTokens: GEMINI_CONFIG.MAX_OUTPUT_TOKENS,
-            },
+            generationConfig: buildGeminiGenerationConfig(
+              maxOutputTokens,
+              useStructuredOutput
+            ),
           }),
           signal: controller.signal,
         }
@@ -1056,7 +1132,20 @@
         throw error;
       }
 
-      return JSON.parse(stripCodeFences(rawText));
+      const cleanedText = extractJsonObjectText(stripCodeFences(rawText));
+
+      try {
+        return JSON.parse(cleanedText);
+      } catch (parseError) {
+        const finishReason = responseData?.candidates?.[0]?.finishReason;
+        const error = new SyntaxError(
+          `Gemini returned invalid JSON for ${modelName}: ${parseError.message}`
+        );
+        error.retryable = true;
+        error.finishReason = finishReason;
+        error.rawTextPreview = cleanedText.slice(0, 300);
+        throw error;
+      }
     } catch (error) {
       if (error?.name === "AbortError") {
         const timeoutError = new Error(
@@ -1071,8 +1160,14 @@
     }
   };
 
-  const requestGeminiAssignments = async (prompt, apiKey) => {
+  const requestGeminiAssignments = async (
+    prompt,
+    apiKey,
+    tabCount,
+    existingGroupCount
+  ) => {
     let lastError = null;
+    const maxOutputTokens = getGeminiMaxOutputTokens(tabCount, existingGroupCount);
 
     for (let index = 0; index < GEMINI_CONFIG.MODELS.length; index++) {
       const modelName = GEMINI_CONFIG.MODELS[index];
@@ -1080,20 +1175,62 @@
         const result = await requestGeminiAssignmentsForModel(
           prompt,
           apiKey,
-          modelName
+          modelName,
+          maxOutputTokens,
+          true
         );
-        console.log(`[TabSort][Gemini] Grouping succeeded with ${modelName}.`);
+        console.log(
+          `[TabSort][Gemini] Grouping succeeded with ${modelName} (${maxOutputTokens} max output tokens).`
+        );
         return result;
       } catch (error) {
-        lastError = error;
+        let effectiveError = error;
+
+        if (shouldRetryGeminiWithoutStructuredOutput(error)) {
+          console.warn(
+            `[TabSort][Gemini] ${modelName} rejected structured output. Retrying without schema.`
+          );
+
+          try {
+            const fallbackResult = await requestGeminiAssignmentsForModel(
+              prompt,
+              apiKey,
+              modelName,
+              maxOutputTokens,
+              false
+            );
+            console.log(
+              `[TabSort][Gemini] Grouping succeeded with ${modelName} without structured output.`
+            );
+            return fallbackResult;
+          } catch (fallbackError) {
+            effectiveError = fallbackError;
+            console.warn(
+              `[TabSort][Gemini] ${modelName} without structured output failed: ${
+                fallbackError?.message || fallbackError
+              }`
+            );
+          }
+        }
+
+        lastError = effectiveError;
         const hasMoreModels = index < GEMINI_CONFIG.MODELS.length - 1;
 
         console.warn(
-          `[TabSort][Gemini] ${modelName} failed: ${error?.message || error}`
+          `[TabSort][Gemini] ${modelName} failed: ${
+            effectiveError?.message || effectiveError
+          }`
         );
 
-        if (!hasMoreModels || !error?.retryable) {
-          throw error;
+        if (effectiveError?.rawTextPreview) {
+          console.warn(
+            `[TabSort][Gemini] ${modelName} raw response preview:`,
+            effectiveError.rawTextPreview
+          );
+        }
+
+        if (!hasMoreModels || !effectiveError?.retryable) {
+          throw effectiveError;
         }
 
         console.warn(
@@ -1151,7 +1288,12 @@
     );
 
     try {
-      const responseData = await requestGeminiAssignments(prompt, apiKey);
+      const responseData = await requestGeminiAssignments(
+        prompt,
+        apiKey,
+        tabRecords.length,
+        existingWorkspaceGroups.size
+      );
       if (!Array.isArray(responseData?.assignments)) {
         throw new Error("Gemini returned an invalid assignments payload");
       }
